@@ -80,11 +80,12 @@ export default function App() {
     
     // Detect mobile device to force single page (portrait) aspect ratio
     const isMobile = window.innerWidth < 768;
+    // ALWAYS force a 2-page target ratio for desktop, 1-page for mobile
     const targetRatio = isMobile ? (baseW / baseH) : ((baseW * 2) / baseH);
     
     let finalWidth, finalHeight;
     
-    // Fit perfectly within the safe container boundaries
+    // Fit perfectly within the safe container boundaries while maintaining strict ratio
     if (cWidth / cHeight > targetRatio) {
       finalHeight = cHeight;
       finalWidth = cHeight * targetRatio;
@@ -194,11 +195,11 @@ export default function App() {
         maxWidth: 2000,
         minHeight: 300,  
         maxHeight: 3000,
-        maxShadowOpacity: 0.6,
-        showCover: !isMobile, 
+        maxShadowOpacity: 0.8, // Increased for a deeper, more realistic spine shadow
+        showCover: true, // Always true to ensure the engine calculates the first page as a right-side single block
         mobileScrollSupport: false,
-        usePortrait: true,
-        flippingTime: 1000
+        usePortrait: isMobile, // Explicitly force portrait ONLY on mobile
+        flippingTime: 1200 // Slightly slowed down for a smoother, less glitchy turn
       });
 
       pageFlipInstance.current.loadFromHTML(flipbookRef.current.querySelectorAll('.page'));
@@ -410,7 +411,13 @@ export default function App() {
         )}
 
         {/* PageFlip Container DOM Node */}
-        <div ref={flipbookRef} className="hidden relative z-10 drop-shadow-2xl"></div>
+        {/* Removed relative drop-shadows that conflicted with the engine's internal shadow calculation */}
+        <div ref={flipbookRef} className="hidden relative z-10 w-full h-full mx-auto" style={{
+          /* This ensures that when closed on page 1, the single page sits perfectly centered in the 2-page container */
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center'
+        }}></div>
         
       </div>
 
