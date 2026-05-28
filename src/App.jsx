@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Maximize, Sparkles, X, ChevronLeft, ChevronRight, BookOpen, Loader2, Info } from 'lucide-react';
+import { Maximize, ChevronLeft, ChevronRight, BookOpen, Loader2 } from 'lucide-react';
 
 export default function App() {
   // --- App State ---
@@ -10,11 +10,6 @@ export default function App() {
   // --- Flipbook State ---
   const [totalPages, setTotalPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
-  const [isAiOpen, setIsAiOpen] = useState(false);
-  
-  // --- AI State (Refactored to proper React State to prevent HTML/Object invariant errors) ---
-  const [aiStatus, setAiStatus] = useState('idle'); // 'idle', 'scanning', 'success', 'error', 'insufficient'
-  const [aiResult, setAiResult] = useState('');
   
   // --- Refs ---
   const flipbookContainerRef = useRef(null);
@@ -25,7 +20,7 @@ export default function App() {
 
   const scale = 2.0; // High-res render scale
   
-  // Using the local public file directly
+  // Using the local public file directly for instant loading
   const pdfUrl = '/catalogue.pdf';
 
   // --- 1. Load External Scripts ---
@@ -46,8 +41,7 @@ export default function App() {
       try {
         await Promise.all([
           loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'),
-          loadScript('https://cdn.jsdelivr.net/npm/page-flip/dist/js/page-flip.browser.js'),
-          loadScript('https://cdn.jsdelivr.net/npm/marked/marked.min.js')
+          loadScript('https://cdn.jsdelivr.net/npm/page-flip/dist/js/page-flip.browser.js')
         ]);
         
         window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -142,7 +136,8 @@ export default function App() {
 
       for (let i = 1; i <= numPages; i++) {
         const pageDiv = document.createElement('div');
-        pageDiv.className = 'page bg-white overflow-hidden border border-gray-200 shadow-[inset_0_0_20px_rgba(0,0,0,0.05)]';
+        // Removed global shadow from the container and kept it localized to the page to fix the "white box" artifact when closed
+        pageDiv.className = 'page bg-white overflow-hidden shadow-[inset_0_0_20px_rgba(0,0,0,0.05)]';
         
         if (i === 1 || i === numPages) pageDiv.setAttribute('data-density', 'hard');
 
@@ -175,13 +170,13 @@ export default function App() {
       pageFlipInstance.current = new window.St.PageFlip(flipbookRef.current, {
         width: pageSize.current.width,
         height: pageSize.current.height,
-        size: "stretch", // Safe to use now because flipbookRef is strictly bound
+        size: "stretch", // Preserves aspect ratio dynamically within the bounds we calculated
         minWidth: 300,
         maxWidth: 2000,
         minHeight: 400,
         maxHeight: 3000,
         maxShadowOpacity: 0.6,
-        showCover: true,
+        showCover: true, // Natively handles the correct centering of the cover
         mobileScrollSupport: false,
         usePortrait: true,
         flippingTime: 1000
@@ -199,7 +194,7 @@ export default function App() {
     } catch (error) {
       console.error(error);
       setAppState('ready');
-      alert("Failed to load catalogue. Please check your network connection.");
+      alert("Failed to load catalogue. Please ensure 'catalogue.pdf' is in the public folder.");
     }
   };
 
@@ -223,120 +218,8 @@ export default function App() {
     return `${currentPage + 1} / ${totalPages}`;
   };
 
-  // Reset AI state if page turns
-  useEffect(() => {
-    if (isAiOpen) {
-      setAiStatus('idle');
-      setAiResult('');
-    }
-  }, [currentPage, isAiOpen]);
-
-  // --- 4. AI Insights Integration ---
-  const extractTextFromVisiblePages = async () => {
-    if (!pdfDocument.current || !pageFlipInstance.current) return "";
-    
-    const orientation = pageFlipInstance.current.getOrientation();
-    let pagesToExtract = [];
-    
-    if (orientation === 'portrait') {
-      pagesToExtract.push(currentPage + 1);
-    } else {
-      if (currentPage === 0) {
-        pagesToExtract.push(1);
-      } else if (currentPage >= totalPages - 1) {
-        pagesToExtract.push(totalPages);
-      } else {
-        pagesToExtract.push(currentPage + 1);
-        if (currentPage + 2 <= totalPages) pagesToExtract.push(currentPage + 2);
-      }
-    }
-
-    let text = "";
-    for (const pageNum of pagesToExtract) {
-      try {
-        const page = await pdfDocument.current.getPage(pageNum);
-        const content = await page.getTextContent();
-        text += content.items.map(i => i.str).join(' ') + "\n\n";
-      } catch (e) {
-        console.warn(`Could not extract text from page ${pageNum}`);
-      }
-    }
-    return text.trim();
-  };
-
-  const generateAiSummary = async () => {
-    setAiStatus('scanning');
-    
-    try {
-      const text = await extractTextFromVisiblePages();
-      
-      if (!text || text.length < 15) {
-        setAiStatus('insufficient');
-        return;
-      }
-
-      const apiKey = ""; // Injected by env
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-      
-      const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue (2026-27). 
-      Provide a clean, highly structured summary in Markdown. 
-      Focus on:
-      1. Identifying the specific Brands mentioned (e.g., Trixie, Bio-Groom).
-      2. Listing the main Product Categories/Types on this page.
-      3. Noting any specific SKUs, sizes, or variants if they are easily readable.
-      Be concise and professional, designed for B2B distributors.\n\nRAW TEXT:\n${text}`;
-
-      const payload = {
-        contents: [{ parts: [{ text: prompt }] }],
-        systemInstruction: { parts: [{ text: "You are an AI assistant for a B2B pet supply distributor. Output strictly in well-formatted Markdown using bullet points and bold text for easy scanning." }] }
-      };
-
-      let result = null;
-      let delay = 1000;
-      
-      for(let i=0; i<3; i++) {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        
-        if (response.ok) { result = await response.json(); break; }
-        await new Promise(r => setTimeout(r, delay)); delay *= 2;
-      }
-
-      if (!result) throw new Error("API failed.");
-
-      const summaryText = result.candidates?.[0]?.content?.parts?.[0]?.text || "No insights generated.";
-      
-      setAiResult(summaryText);
-      setAiStatus('success');
-
-    } catch (error) {
-      console.error(error);
-      setAiStatus('error');
-    }
-  };
-
-  // --- CSS Overrides for Markdown injected content ---
-  const markdownStyles = `
-    @keyframes slideFadeIn {
-      from { opacity: 0; transform: translateY(16px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .animate-slide-fade {
-      animation: slideFadeIn 0.5s ease-out forwards;
-    }
-    .markdown-body h1, .markdown-body h2, .markdown-body h3 { color: white; font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; border-bottom: 1px solid #334155; padding-bottom: 0.3em;}
-    .markdown-body p { margin-bottom: 1em; }
-    .markdown-body ul { list-style-type: disc; padding-left: 1.5em; margin-bottom: 1em; color: #cbd5e1; }
-    .markdown-body li { margin-bottom: 0.25em; }
-    .markdown-body strong { color: #60a5fa; font-weight: 600; }
-  `;
-
   return (
     <div className="flex flex-col w-screen h-screen overflow-hidden text-white font-sans bg-[#0f172a] relative">
-      <style dangerouslySetInnerHTML={{ __html: markdownStyles }} />
       {/* Background radial gradients */}
       <div className="absolute inset-0 z-0 pointer-events-none" style={{
         backgroundImage: `
@@ -359,16 +242,6 @@ export default function App() {
           <button onClick={toggleFullScreen} className="p-2 rounded-lg bg-[#1e293b] border border-slate-700 hover:bg-slate-700 transition-all text-gray-300 hover:text-white shadow-lg" title="Toggle Fullscreen">
             <Maximize size={18} />
           </button>
-          
-          {appState === 'viewing' && (
-            <button 
-              onClick={() => setIsAiOpen(!isAiOpen)} 
-              className="bg-blue-600 border border-blue-500 text-white px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-500 transition-all flex items-center gap-2 shadow-[0_0_15px_rgba(37,99,235,0.4)]"
-            >
-              <Sparkles size={16} />
-              AI Insights
-            </button>
-          )}
         </div>
       </div>
 
@@ -409,7 +282,7 @@ export default function App() {
                 
                 <p className="text-gray-300 max-w-2xl mb-10 text-lg leading-relaxed text-center">
                   Seamlessly browse our curated portfolio of international and in-house pet care brands. 
-                  Experience our digital catalogue with realistic page-turning physics and AI-powered product insights.
+                  Experience our digital catalogue with realistic page-turning physics.
                 </p>
 
                 <button 
@@ -425,8 +298,9 @@ export default function App() {
           </div>
         )}
 
-        {/* PageFlip Container DOM Node (Pixel dimensions managed by resizeBook) */}
-        <div ref={flipbookRef} className="shadow-2xl hidden relative z-10"></div>
+        {/* PageFlip Container DOM Node */}
+        {/* Removed global wrapper shadow to fix the white block artifact during the first cover render */}
+        <div ref={flipbookRef} className="hidden relative z-10 drop-shadow-2xl"></div>
         
       </div>
 
@@ -454,86 +328,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {/* --- Exact Selection Implementation: AI Sidebar (Solid & 3D Top Layer) --- */}
-      <div 
-        className="fixed top-0 flex flex-col border-l-4 border-blue-600 bg-[#0f172a] h-screen w-[420px] shadow-[0_0_50px_rgba(0,0,0,0.8)]"
-        style={{
-          zIndex: 9999, // Guaranteed Top Layer
-          transform: 'translateZ(9999px)', // Escapes 3D render context bugs
-          transition: 'right 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
-          right: isAiOpen ? '0px' : '-450px'
-        }}
-      >
-        {/* Sidebar Header */}
-        <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-[#1e293b]">
-          <div className="flex items-center gap-3 text-blue-400">
-            <div className="p-2 bg-blue-500/20 border border-blue-500/30 rounded-lg">
-              <Sparkles size={20} strokeWidth={2.5} />
-            </div>
-            <h3 className="font-bold text-lg text-white tracking-wide">AI Assistant</h3>
-          </div>
-          <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-gray-400 hover:text-white">
-            <X size={20} strokeWidth={2.5} />
-          </button>
-        </div>
-        
-        {/* Sidebar Content Area */}
-        <div className="flex-grow p-6 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 bg-[#0f172a]">
-          
-          {aiStatus === 'idle' && (
-            <div className="flex flex-col items-center justify-center h-full text-center text-slate-500 mt-10">
-              <Info size={56} strokeWidth={1} className="mb-6 opacity-50" />
-              <p className="max-w-[250px] font-medium leading-relaxed">Analyze the current spread to instantly extract brands, categories, and SKU data.</p>
-            </div>
-          )}
-
-          {aiStatus === 'scanning' && (
-            <div className="flex flex-col items-center justify-center h-full text-center text-blue-400 mt-10">
-              <Loader2 size={48} className="animate-spin mb-6" />
-              <p className="font-medium tracking-wide">Scanning Catalogue...</p>
-            </div>
-          )}
-
-          {aiStatus === 'insufficient' && (
-            <div className="bg-[#1e293b] p-5 rounded-xl border border-slate-700 text-center shadow-inner mt-4">
-                <p className="text-gray-300 font-medium">Insufficient text found on this spread. It appears to be primarily visual.</p>
-            </div>
-          )}
-
-          {aiStatus === 'error' && (
-            <div className="bg-red-900/30 text-red-400 p-5 rounded-xl border border-red-800/80 flex items-center gap-3 mt-4">
-                Failed to generate insights. Please try again.
-            </div>
-          )}
-
-          {aiStatus === 'success' && (
-            <div 
-              dangerouslySetInnerHTML={{ __html: window.marked ? window.marked.parse(aiResult) : aiResult }} 
-              className="markdown-body animate-slide-fade" 
-            />
-          )}
-
-        </div>
-        
-        {/* Sidebar Footer / Action Button */}
-        <div className="p-5 border-t border-slate-800 bg-[#1e293b]">
-          <button 
-            onClick={generateAiSummary}
-            disabled={aiStatus === 'scanning'}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:opacity-100 text-white py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.4)] hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] disabled:shadow-none"
-          >
-            {aiStatus === 'scanning' ? (
-              <>
-                <Loader2 className="animate-spin" size={20} />
-                <span>Scanning Catalogue...</span>
-              </>
-            ) : (
-              <span>Scan Current Spread</span>
-            )}
-          </button>
-        </div>
-      </div>
 
     </div>
   );
