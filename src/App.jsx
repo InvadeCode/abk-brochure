@@ -25,7 +25,7 @@ export default function App() {
   const scale = 2.0; // High-res render scale
   
   // ABK Imports PDF
-  const pdfUrl = 'https://5489382d-e5dd-44ec-a4eb-680874f5cf71.usrfiles.com/ugd/548938_976dfb283a734b59b1edf75759e74bee.pdf';
+  const pdfUrl = '/catalogue.pdf';
 
   // --- 1. Load External Scripts ---
   useEffect(() => {
