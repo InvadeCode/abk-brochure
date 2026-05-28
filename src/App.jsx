@@ -284,18 +284,12 @@ export default function App() {
           let snippet = pageText.substring(start, end);
           if (start > 0) snippet = '...' + snippet;
           if (end < pageText.length) snippet = snippet + '...';
-          
-          // Apply HTML highlighting to the matched keyword within the snippet
-          const highlightedSnippet = snippet.replace(
-            searchRegex, 
-            match => `<mark class="bg-blue-500/40 text-blue-100 rounded px-1 font-bold border border-blue-500/50">${match}</mark>`
-          );
 
           results.push({
             pageIndex: i - 1, // St.PageFlip uses 0-based index
             pageNumber: i,
             matchCount: matches.length,
-            snippet: highlightedSnippet
+            snippet: snippet // Keep raw string, highlight later via React Component
           });
         }
       }
@@ -318,6 +312,28 @@ export default function App() {
     if (window.innerWidth < 768) {
       setIsSearchOpen(false); // Auto-hide search panel on mobile
     }
+  };
+
+  // Safe Highlighting Component
+  const HighlightedText = ({ text, highlight }) => {
+    if (!highlight.trim()) return <span>{text}</span>;
+    // Create a regex to split the text by the search query (case-insensitive)
+    const regex = new RegExp(`(${highlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    const parts = text.split(regex);
+    
+    return (
+      <span>
+        {parts.map((part, i) => 
+          regex.test(part) ? (
+            <mark key={i} className="bg-blue-500/40 text-blue-100 rounded px-1 font-bold border border-blue-500/50">
+              {part}
+            </mark>
+          ) : (
+            <span key={i}>{part}</span>
+          )
+        )}
+      </span>
+    );
   };
 
   return (
@@ -348,7 +364,7 @@ export default function App() {
               title="Search Catalogue"
             >
               <Search size={18} />
-              <span className="hidden md:block text-sm font-semibold">Search SKU</span>
+              <span className="hidden md:block text-sm font-semibold">Search Catalogue</span>
             </button>
           )}
           <button onClick={toggleFullScreen} className="p-2 rounded-lg bg-[#1e293b] border border-slate-700 hover:bg-slate-700 transition-all text-gray-300 hover:text-white shadow-lg" title="Toggle Fullscreen">
@@ -459,7 +475,7 @@ export default function App() {
             <div className="p-2 bg-blue-500/20 border border-blue-500/30 rounded-lg">
               <Search size={20} strokeWidth={2.5} />
             </div>
-            <h3 className="font-bold text-lg text-white tracking-wide">Find SKU</h3>
+            <h3 className="font-bold text-lg text-white tracking-wide">Find SKU or Product</h3>
           </div>
           <button onClick={() => setIsSearchOpen(false)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-gray-400 hover:text-white">
             <X size={20} strokeWidth={2.5} />
@@ -472,7 +488,7 @@ export default function App() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="e.g., 631467 or Twistix"
+              placeholder="e.g., Twistix or 631528"
               className="flex-grow bg-[#0f172a] border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
             />
             <button 
@@ -530,7 +546,7 @@ export default function App() {
                   </div>
                   
                   <div className="text-sm text-slate-300 leading-relaxed italic bg-slate-900/50 p-3 rounded-lg border border-slate-800/50 shadow-inner">
-                    <span dangerouslySetInnerHTML={{ __html: `"...${result.snippet.replace(/^\.\.\.|\.\.\.$/g, '')}..."` }} />
+                    <HighlightedText text={`"...${result.snippet.replace(/^\.\.\.|\.\.\.$/g, '')}..."`} highlight={searchQuery} />
                   </div>
                 </button>
               ))}
