@@ -246,37 +246,64 @@ export default function App() {
     return `${currentPage + 1} / ${totalPages}`;
   };
 
-  // --- 4. OCR Search Logic ---
+  // --- 4. Super Smart OCR Search Logic ---
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!searchQuery.trim() || !pdfDocument.current) return;
 
     setIsSearching(true);
     setSearchResults([]);
-    const query = searchQuery.toLowerCase();
+    const query = searchQuery.trim();
+    // Escape regex characters to safely search for SKUs with dashes/special chars
+    const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const searchRegex = new RegExp(safeQuery, 'gi');
     const results = [];
 
     try {
       for (let i = 1; i <= totalPages; i++) {
         // Yield occasionally to prevent UI freezing
-        if (i % 10 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
 
         const page = await pdfDocument.current.getPage(i);
         const textContent = await page.getTextContent();
         
-        // Extract plain text string
-        const pageText = textContent.items.map(item => item.str).join(' ').toLowerCase();
+        // Extract plain text string while preserving basic spacing
+        const pageText = textContent.items.map(item => item.str).join(' ');
+        
+        // Find all occurrences on the page
+        const matches = [...pageText.matchAll(searchRegex)];
 
-        if (pageText.includes(query)) {
-          results.push(i - 1); // St.PageFlip uses 0-based index
+        if (matches.length > 0) {
+          const firstMatch = matches[0];
+          
+          // Extract a ~90 character snippet around the first match for context
+          const start = Math.max(0, firstMatch.index - 45);
+          const end = Math.min(pageText.length, firstMatch.index + query.length + 45);
+          
+          let snippet = pageText.substring(start, end);
+          if (start > 0) snippet = '...' + snippet;
+          if (end < pageText.length) snippet = snippet + '...';
+          
+          // Apply HTML highlighting to the matched keyword within the snippet
+          const highlightedSnippet = snippet.replace(
+            searchRegex, 
+            match => `<mark class="bg-blue-500/40 text-blue-100 rounded px-1 font-bold border border-blue-500/50">${match}</mark>`
+          );
+
+          results.push({
+            pageIndex: i - 1, // St.PageFlip uses 0-based index
+            pageNumber: i,
+            matchCount: matches.length,
+            snippet: highlightedSnippet
+          });
         }
       }
       
       setSearchResults(results);
       
-      // If we find exactly one matching result, or just want to jump to the first immediately
-      if (results.length > 0) {
-        pageFlipInstance.current.flip(results[0]);
+      // Auto-jump if there is exactly 1 highly specific match
+      if (results.length === 1) {
+        jumpToSearchResult(results[0].pageIndex);
       }
     } catch (err) {
       console.error("Search extraction failed", err);
@@ -456,7 +483,7 @@ export default function App() {
           {isSearching && (
             <div className="flex flex-col items-center justify-center h-full text-center text-blue-400">
               <Loader2 size={40} className="animate-spin mb-4" />
-              <p className="font-medium tracking-wide">Scanning {totalPages} pages...</p>
+              <p className="font-medium tracking-wide">Scanning {totalPages} pages using OCR...</p>
             </div>
           )}
 
@@ -468,17 +495,35 @@ export default function App() {
           )}
 
           {!isSearching && searchResults.length > 0 && (
-            <div className="space-y-3">
-              <p className="text-sm text-slate-400 mb-4 px-2 font-medium">Found in {searchResults.length} page(s):</p>
-              {searchResults.map((pageIndex) => (
+            <div className="space-y-4">
+              <p className="text-sm text-slate-400 mb-4 px-1 font-medium flex items-center justify-between">
+                <span>Found in {searchResults.length} page(s)</span>
+                <span className="text-xs bg-slate-800 px-2 py-1 rounded-full border border-slate-700">Exact Match</span>
+              </p>
+              
+              {searchResults.map((result, idx) => (
                 <button
-                  key={pageIndex}
-                  onClick={() => jumpToSearchResult(pageIndex)}
-                  className="w-full flex items-center justify-between bg-[#1e293b] hover:bg-slate-700 p-4 rounded-xl border border-slate-700 hover:border-slate-500 transition-all group"
+                  key={idx}
+                  onClick={() => jumpToSearchResult(result.pageIndex)}
+                  className="w-full text-left bg-[#1e293b] hover:bg-slate-800 p-4 rounded-xl border border-slate-700 hover:border-blue-500/50 transition-all group flex flex-col gap-3 shadow-lg"
                 >
-                  <span className="font-semibold text-white">Jump to Page {pageIndex + 1}</span>
-                  <div className="bg-slate-800 p-1.5 rounded-md group-hover:bg-blue-600 group-hover:text-white transition-colors text-slate-400">
-                    <ChevronRight size={18} />
+                  <div className="flex items-center justify-between w-full border-b border-slate-700/50 pb-2">
+                    <span className="font-bold text-white flex items-center gap-2">
+                      <BookOpen size={16} className="text-blue-400" />
+                      Page {result.pageNumber}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-slate-400 bg-slate-900 px-2 py-1 rounded-md">
+                        {result.matchCount} match{result.matchCount > 1 ? 'es' : ''}
+                      </span>
+                      <div className="bg-slate-800 p-1 rounded-md group-hover:bg-blue-600 group-hover:text-white transition-colors text-slate-400">
+                        <ChevronRight size={16} strokeWidth={3} />
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="text-sm text-slate-300 leading-relaxed italic bg-slate-900/50 p-3 rounded-lg border border-slate-800/50 shadow-inner">
+                    <span dangerouslySetInnerHTML={{ __html: `"...${result.snippet.replace(/^\.\.\.|\.\.\.$/g, '')}..."` }} />
                   </div>
                 </button>
               ))}
