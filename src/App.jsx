@@ -12,9 +12,9 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(0);
   const [isAiOpen, setIsAiOpen] = useState(false);
   
-  // --- AI State ---
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiContent, setAiContent] = useState('');
+  // --- AI State (Refactored to proper React State to prevent HTML/Object invariant errors) ---
+  const [aiStatus, setAiStatus] = useState('idle'); // 'idle', 'scanning', 'success', 'error', 'insufficient'
+  const [aiResult, setAiResult] = useState('');
   
   // --- Refs ---
   const flipbookContainerRef = useRef(null);
@@ -25,7 +25,7 @@ export default function App() {
 
   const scale = 2.0; // High-res render scale
   
-  //const pdfUrl = 'https://5489382d-e5dd-44ec-a4eb-680874f5cf71.usrfiles.com/ugd/548938_5f8b7b4cc57d44b98d86d234e5fc87aa.pdf';
+  // Using the local public file directly
   const pdfUrl = '/catalogue.pdf';
 
   // --- 1. Load External Scripts ---
@@ -114,21 +114,11 @@ export default function App() {
     setLoadingProgress(10);
 
     try {
-      let response = null;
-      
-      try { response = await fetch('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(pdfUrl)); } catch (e) {}
-      if (!response || !response.ok) {
-        try { response = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(pdfUrl)); } catch (e) {}
-      }
-      if (!response || !response.ok) {
-        try { response = await fetch('https://corsproxy.io/?' + encodeURIComponent(pdfUrl)); } catch (e) {}
-      }
-      if (!response || !response.ok) {
-        try { response = await fetch(pdfUrl); } catch (e) {}
-      }
+      // Since the file is local (/catalogue.pdf), we fetch it directly without any proxies.
+      const response = await fetch(pdfUrl);
 
       if (!response || !response.ok) {
-         throw new Error(`Failed to fetch the PDF.`);
+         throw new Error(`Failed to fetch the local PDF. Ensure /catalogue.pdf exists in the public directory.`);
       }
       
       const arrayBuffer = await response.arrayBuffer();
@@ -233,13 +223,11 @@ export default function App() {
     return `${currentPage + 1} / ${totalPages}`;
   };
 
+  // Reset AI state if page turns
   useEffect(() => {
     if (isAiOpen) {
-      setAiContent(`
-        <div class="flex flex-col items-center justify-center h-full text-center text-gray-400 mt-20 opacity-60">
-            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="mb-4"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 2v6h6"/></svg>
-            <p class="max-w-[250px]">Spread changed. Click "Scan Current Spread" to analyze the new pages.</p>
-        </div>`);
+      setAiStatus('idle');
+      setAiResult('');
     }
   }, [currentPage, isAiOpen]);
 
@@ -277,23 +265,17 @@ export default function App() {
   };
 
   const generateAiSummary = async () => {
-    setAiLoading(true);
-    setAiContent('');
+    setAiStatus('scanning');
     
     try {
       const text = await extractTextFromVisiblePages();
       
       if (!text || text.length < 15) {
-        setAiContent(`
-          <div class="bg-[#1e293b] p-5 rounded-xl border border-slate-700 text-center shadow-inner">
-              <p class="text-gray-300 font-medium">Insufficient text found on this spread. It appears to be primarily visual.</p>
-          </div>
-        `);
-        setAiLoading(false);
+        setAiStatus('insufficient');
         return;
       }
 
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY; // Injected by env
+      const apiKey = ""; // Injected by env
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
       
       const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue (2026-27). 
@@ -327,26 +309,24 @@ export default function App() {
 
       const summaryText = result.candidates?.[0]?.content?.parts?.[0]?.text || "No insights generated.";
       
-      setAiContent(`<div class="markdown-body opacity-0 translate-y-4 transition-all duration-500 ease-out" id="markdown-result">${window.marked.parse(summaryText)}</div>`);
-      
-      setTimeout(() => {
-        const el = document.getElementById('markdown-result');
-        if(el) el.classList.remove('opacity-0', 'translate-y-4');
-      }, 50);
+      setAiResult(summaryText);
+      setAiStatus('success');
 
     } catch (error) {
       console.error(error);
-      setAiContent(`
-        <div class="bg-red-900/30 text-red-400 p-5 rounded-xl border border-red-800/80 flex items-center gap-3">
-            Failed to generate insights. Please try again.
-        </div>`);
-    } finally {
-      setAiLoading(false);
+      setAiStatus('error');
     }
   };
 
   // --- CSS Overrides for Markdown injected content ---
   const markdownStyles = `
+    @keyframes slideFadeIn {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-slide-fade {
+      animation: slideFadeIn 0.5s ease-out forwards;
+    }
     .markdown-body h1, .markdown-body h2, .markdown-body h3 { color: white; font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; border-bottom: 1px solid #334155; padding-bottom: 0.3em;}
     .markdown-body p { margin-bottom: 1em; }
     .markdown-body ul { list-style-type: disc; padding-left: 1.5em; margin-bottom: 1em; color: #cbd5e1; }
@@ -356,7 +336,7 @@ export default function App() {
 
   return (
     <div className="flex flex-col w-screen h-screen overflow-hidden text-white font-sans bg-[#0f172a] relative">
-      <style>{markdownStyles}</style>
+      <style dangerouslySetInnerHTML={{ __html: markdownStyles }} />
       {/* Background radial gradients */}
       <div className="absolute inset-0 z-0 pointer-events-none" style={{
         backgroundImage: `
@@ -500,24 +480,50 @@ export default function App() {
         
         {/* Sidebar Content Area */}
         <div className="flex-grow p-6 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 bg-[#0f172a]">
-          {aiContent ? (
-            <div dangerouslySetInnerHTML={{ __html: aiContent }} className="text-slate-200 text-[0.95rem] leading-relaxed" />
-          ) : (
+          
+          {aiStatus === 'idle' && (
             <div className="flex flex-col items-center justify-center h-full text-center text-slate-500 mt-10">
               <Info size={56} strokeWidth={1} className="mb-6 opacity-50" />
               <p className="max-w-[250px] font-medium leading-relaxed">Analyze the current spread to instantly extract brands, categories, and SKU data.</p>
             </div>
           )}
+
+          {aiStatus === 'scanning' && (
+            <div className="flex flex-col items-center justify-center h-full text-center text-blue-400 mt-10">
+              <Loader2 size={48} className="animate-spin mb-6" />
+              <p className="font-medium tracking-wide">Scanning Catalogue...</p>
+            </div>
+          )}
+
+          {aiStatus === 'insufficient' && (
+            <div className="bg-[#1e293b] p-5 rounded-xl border border-slate-700 text-center shadow-inner mt-4">
+                <p className="text-gray-300 font-medium">Insufficient text found on this spread. It appears to be primarily visual.</p>
+            </div>
+          )}
+
+          {aiStatus === 'error' && (
+            <div className="bg-red-900/30 text-red-400 p-5 rounded-xl border border-red-800/80 flex items-center gap-3 mt-4">
+                Failed to generate insights. Please try again.
+            </div>
+          )}
+
+          {aiStatus === 'success' && (
+            <div 
+              dangerouslySetInnerHTML={{ __html: window.marked ? window.marked.parse(aiResult) : aiResult }} 
+              className="markdown-body animate-slide-fade" 
+            />
+          )}
+
         </div>
         
         {/* Sidebar Footer / Action Button */}
         <div className="p-5 border-t border-slate-800 bg-[#1e293b]">
           <button 
             onClick={generateAiSummary}
-            disabled={aiLoading}
+            disabled={aiStatus === 'scanning'}
             className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:opacity-100 text-white py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.4)] hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] disabled:shadow-none"
           >
-            {aiLoading ? (
+            {aiStatus === 'scanning' ? (
               <>
                 <Loader2 className="animate-spin" size={20} />
                 <span>Scanning Catalogue...</span>
