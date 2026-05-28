@@ -293,7 +293,7 @@ export default function App() {
         return;
       }
 
-      const apiKey = ""; // Injected by env
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY; // Injected by env
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
       
       const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue (2026-27). 
