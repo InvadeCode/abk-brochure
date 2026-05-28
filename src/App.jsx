@@ -21,12 +21,12 @@ export default function App() {
   const flipbookRef = useRef(null);
   const pageFlipInstance = useRef(null);
   const pdfDocument = useRef(null);
+  const pageSize = useRef({ width: 0, height: 0 }); // Store for resize logic
 
   const scale = 2.0; // High-res render scale
   
-  // ABK Imports PDF
+  //const pdfUrl = 'https://5489382d-e5dd-44ec-a4eb-680874f5cf71.usrfiles.com/ugd/548938_5f8b7b4cc57d44b98d86d234e5fc87aa.pdf';
   const pdfUrl = '/catalogue.pdf';
-  //https://5489382d-e5dd-44ec-a4eb-680874f5cf71.usrfiles.com/ugd/548938_5f8b7b4cc57d44b98d86d234e5fc87aa.pdf;
 
   // --- 1. Load External Scripts ---
   useEffect(() => {
@@ -50,7 +50,6 @@ export default function App() {
           loadScript('https://cdn.jsdelivr.net/npm/marked/marked.min.js')
         ]);
         
-        // Configure PDF.js worker
         window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
         
         setAppState('ready');
@@ -62,12 +61,50 @@ export default function App() {
 
     loadScripts();
     
-    // Cleanup on unmount
     return () => {
       if (pageFlipInstance.current) {
         pageFlipInstance.current.destroy();
       }
     };
+  }, []);
+
+  // --- Layout Engine (Fixes Cropping & Overlap) ---
+  const resizeBook = () => {
+    if (!flipbookContainerRef.current || !flipbookRef.current || !pageSize.current.width) return;
+    
+    const container = flipbookContainerRef.current;
+    const { width: baseW, height: baseH } = pageSize.current;
+    
+    const cWidth = container.clientWidth;
+    const cHeight = container.clientHeight;
+    
+    // Determine aspect ratio (2 pages wide vs 1 page tall)
+    const isMobile = window.innerWidth < 768;
+    const targetRatio = isMobile ? (baseW / baseH) : ((baseW * 2) / baseH);
+    
+    let finalWidth, finalHeight;
+    
+    // Fit perfectly within the safe container boundaries
+    if (cWidth / cHeight > targetRatio) {
+      finalHeight = cHeight;
+      finalWidth = cHeight * targetRatio;
+    } else {
+      finalWidth = cWidth;
+      finalHeight = cWidth / targetRatio;
+    }
+    
+    // Apply exact safe pixel boundaries
+    flipbookRef.current.style.width = `${finalWidth}px`;
+    flipbookRef.current.style.height = `${finalHeight}px`;
+    
+    if (pageFlipInstance.current) {
+      pageFlipInstance.current.update();
+    }
+  };
+
+  useEffect(() => {
+    window.addEventListener('resize', resizeBook);
+    return () => window.removeEventListener('resize', resizeBook);
   }, []);
 
   // --- 2. Load PDF and Build Flipbook ---
@@ -79,34 +116,19 @@ export default function App() {
     try {
       let response = null;
       
-      // Attempt 1: AllOrigins proxy (often more reliable in iframes)
-      try {
-        response = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(pdfUrl));
-      } catch (e) {
-        console.warn("AllOrigins proxy failed:", e);
-      }
-      
-      // Attempt 2: CorsProxy
+      try { response = await fetch('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(pdfUrl)); } catch (e) {}
       if (!response || !response.ok) {
-        try {
-          response = await fetch('https://corsproxy.io/?' + encodeURIComponent(pdfUrl));
-        } catch (e) {
-          console.warn("CorsProxy failed:", e);
-        }
+        try { response = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(pdfUrl)); } catch (e) {}
       }
-      
-      // Attempt 3: Direct fetch (in case CORS is surprisingly allowed or proxies are blocked)
       if (!response || !response.ok) {
-        try {
-          response = await fetch(pdfUrl);
-        } catch (e) {
-          console.warn("Direct fetch failed:", e);
-          throw new Error("Network request failed for all endpoints. Check console and adblockers.");
-        }
+        try { response = await fetch('https://corsproxy.io/?' + encodeURIComponent(pdfUrl)); } catch (e) {}
+      }
+      if (!response || !response.ok) {
+        try { response = await fetch(pdfUrl); } catch (e) {}
       }
 
       if (!response || !response.ok) {
-         throw new Error(`Failed to fetch the PDF. Status: ${response?.status}`);
+         throw new Error(`Failed to fetch the PDF.`);
       }
       
       const arrayBuffer = await response.arrayBuffer();
@@ -115,35 +137,30 @@ export default function App() {
       setLoadingProgress(30);
       setLoadingText("Parsing PDF structure...");
 
-      // Pass the raw byte array directly to PDF.js
       const loadingTask = window.pdfjsLib.getDocument({ data: pdfData });
       pdfDocument.current = await loadingTask.promise;
       
       const numPages = pdfDocument.current.numPages;
       setTotalPages(numPages);
 
-      // 2. Build DOM manually to hand over to PageFlip (React shouldn't manage these children)
       setLoadingText("Rendering high-res pages...");
-      if (flipbookRef.current) {
-        flipbookRef.current.innerHTML = ''; // Clear previous
-      }
+      if (flipbookRef.current) flipbookRef.current.innerHTML = '';
 
       const page1 = await pdfDocument.current.getPage(1);
       const viewport1 = page1.getViewport({ scale: 1 });
-      const baseWidth = viewport1.width;
-      const baseHeight = viewport1.height;
+      pageSize.current = { width: viewport1.width, height: viewport1.height };
 
       for (let i = 1; i <= numPages; i++) {
         const pageDiv = document.createElement('div');
-        pageDiv.className = 'page bg-white overflow-hidden shadow-[inset_0_0_20px_rgba(0,0,0,0.05)]';
+        pageDiv.className = 'page bg-white overflow-hidden border border-gray-200 shadow-[inset_0_0_20px_rgba(0,0,0,0.05)]';
         
         if (i === 1 || i === numPages) pageDiv.setAttribute('data-density', 'hard');
 
         const contentDiv = document.createElement('div');
-        contentDiv.className = 'page-content w-full h-full flex justify-center items-center';
+        contentDiv.className = 'page-content w-full h-full flex justify-center items-center bg-white';
 
         const canvas = document.createElement('canvas');
-        canvas.className = 'w-full h-full object-fill';
+        canvas.className = 'w-full h-full object-fill bg-white';
         
         const page = await pdfDocument.current.getPage(i);
         const viewport = page.getViewport({ scale });
@@ -157,16 +174,18 @@ export default function App() {
         pageDiv.appendChild(contentDiv);
         flipbookRef.current.appendChild(pageDiv);
 
-        setLoadingProgress(30 + ((i / numPages) * 70)); // Remaining 70% is rendering
+        setLoadingProgress(30 + ((i / numPages) * 70));
       }
 
       flipbookRef.current.style.display = 'block';
 
-      // 3. Initialize St.PageFlip
+      // Ensure dimensions are set before initializing
+      resizeBook();
+
       pageFlipInstance.current = new window.St.PageFlip(flipbookRef.current, {
-        width: baseWidth,
-        height: baseHeight,
-        size: "stretch",
+        width: pageSize.current.width,
+        height: pageSize.current.height,
+        size: "stretch", // Safe to use now because flipbookRef is strictly bound
         minWidth: 300,
         maxWidth: 2000,
         minHeight: 400,
@@ -214,7 +233,6 @@ export default function App() {
     return `${currentPage + 1} / ${totalPages}`;
   };
 
-  // Clear AI content if page turns
   useEffect(() => {
     if (isAiOpen) {
       setAiContent(`
@@ -267,8 +285,8 @@ export default function App() {
       
       if (!text || text.length < 15) {
         setAiContent(`
-          <div class="bg-gray-800/50 p-5 rounded-xl border border-gray-700 text-center">
-              <p class="text-gray-300">Insufficient text found on this spread. It appears to be primarily visual.</p>
+          <div class="bg-[#1e293b] p-5 rounded-xl border border-slate-700 text-center shadow-inner">
+              <p class="text-gray-300 font-medium">Insufficient text found on this spread. It appears to be primarily visual.</p>
           </div>
         `);
         setAiLoading(false);
@@ -319,7 +337,7 @@ export default function App() {
     } catch (error) {
       console.error(error);
       setAiContent(`
-        <div class="bg-red-900/20 text-red-400 p-5 rounded-xl border border-red-800/50 flex items-center gap-3">
+        <div class="bg-red-900/30 text-red-400 p-5 rounded-xl border border-red-800/80 flex items-center gap-3">
             Failed to generate insights. Please try again.
         </div>`);
     } finally {
@@ -329,11 +347,11 @@ export default function App() {
 
   // --- CSS Overrides for Markdown injected content ---
   const markdownStyles = `
-    .markdown-body h1, .markdown-body h2, .markdown-body h3 { color: white; font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.3em;}
+    .markdown-body h1, .markdown-body h2, .markdown-body h3 { color: white; font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; border-bottom: 1px solid #334155; padding-bottom: 0.3em;}
     .markdown-body p { margin-bottom: 1em; }
     .markdown-body ul { list-style-type: disc; padding-left: 1.5em; margin-bottom: 1em; color: #cbd5e1; }
     .markdown-body li { margin-bottom: 0.25em; }
-    .markdown-body strong { color: #93c5fd; font-weight: 600; }
+    .markdown-body strong { color: #60a5fa; font-weight: 600; }
   `;
 
   return (
@@ -348,7 +366,7 @@ export default function App() {
       }} />
 
       {/* --- Top Navigation --- */}
-      <div className="absolute top-0 left-0 right-0 p-4 px-6 flex justify-between items-center z-50 bg-gradient-to-b from-black/70 to-transparent">
+      <div className="absolute top-0 left-0 right-0 p-4 px-6 flex justify-between items-center z-50 bg-gradient-to-b from-black/80 to-transparent">
         <div className="flex items-center gap-4">
           <img src="https://www.abkgrooming.com/cdn/shop/files/abk_red_logo.png?v=1729148610&width=200" alt="ABK Imports Logo" className="h-10 object-contain drop-shadow-md" />
           <div>
@@ -358,14 +376,14 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-3">
-          <button onClick={toggleFullScreen} className="p-2 rounded-lg bg-slate-900/60 backdrop-blur-md border border-white/10 hover:bg-white/10 transition-all text-gray-300 hover:text-white shadow-lg" title="Toggle Fullscreen">
+          <button onClick={toggleFullScreen} className="p-2 rounded-lg bg-[#1e293b] border border-slate-700 hover:bg-slate-700 transition-all text-gray-300 hover:text-white shadow-lg" title="Toggle Fullscreen">
             <Maximize size={18} />
           </button>
           
           {appState === 'viewing' && (
             <button 
               onClick={() => setIsAiOpen(!isAiOpen)} 
-              className="bg-blue-600/20 border border-blue-500/40 text-blue-300 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-600 hover:text-white transition-all flex items-center gap-2 shadow-[0_0_15px_rgba(37,99,235,0.2)]"
+              className="bg-blue-600 border border-blue-500 text-white px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-500 transition-all flex items-center gap-2 shadow-[0_0_15px_rgba(37,99,235,0.4)]"
             >
               <Sparkles size={16} />
               AI Insights
@@ -374,36 +392,36 @@ export default function App() {
         </div>
       </div>
 
-      {/* --- Main Scene Area --- */}
+      {/* --- Hover Navigation Zones (Global) --- */}
+      {appState === 'viewing' && (
+        <>
+          <div className="absolute top-1/2 -translate-y-1/2 left-4 h-[60%] w-[80px] z-40 flex items-center justify-start cursor-pointer opacity-0 hover:opacity-100 hover:-translate-x-1 transition-all group" onClick={() => pageFlipInstance.current?.flipPrev()}>
+            <div className="bg-[#0f172a] border border-slate-700 text-white p-4 rounded-full shadow-2xl transition-all group-hover:bg-blue-600 group-hover:border-blue-500 group-hover:shadow-[0_0_20px_rgba(37,99,235,0.6)]">
+              <ChevronLeft size={32} strokeWidth={3} />
+            </div>
+          </div>
+          
+          <div className="absolute top-1/2 -translate-y-1/2 right-4 h-[60%] w-[80px] z-40 flex items-center justify-end cursor-pointer opacity-0 hover:opacity-100 hover:translate-x-1 transition-all group" onClick={() => pageFlipInstance.current?.flipNext()}>
+            <div className="bg-[#0f172a] border border-slate-700 text-white p-4 rounded-full shadow-2xl transition-all group-hover:bg-blue-600 group-hover:border-blue-500 group-hover:shadow-[0_0_20px_rgba(37,99,235,0.6)]">
+              <ChevronRight size={32} strokeWidth={3} />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* --- Main Scene Area (Isolated and perfectly bound) --- */}
       <div 
         ref={flipbookContainerRef}
-        className="flex-grow flex justify-center items-center w-full h-full relative z-10 box-border"
-        style={{ padding: 'calc(4rem + 3%) 3% 3% 3%' }} // Exact padding requested
+        className="absolute top-[90px] bottom-[90px] left-[3%] right-[3%] z-10 flex justify-center items-center"
+        style={{ isolation: 'isolate' }} // Fixes 3D Canvas bleed-through
       >
         
-        {/* Hover Navigation Zones (Active only when viewing) */}
-        {appState === 'viewing' && (
-          <>
-            <div className="absolute top-1/2 -translate-y-1/2 left-4 h-[60%] w-[100px] z-40 flex items-center justify-start cursor-pointer opacity-0 hover:opacity-100 hover:-translate-x-1 transition-all group" onClick={() => pageFlipInstance.current?.flipPrev()}>
-              <div className="bg-slate-900/70 backdrop-blur-md border border-white/15 text-white p-4 rounded-full shadow-2xl transition-all group-hover:bg-blue-600/90 group-hover:shadow-[0_0_20px_rgba(37,99,235,0.5)]">
-                <ChevronLeft size={36} strokeWidth={2.5} />
-              </div>
-            </div>
-            
-            <div className="absolute top-1/2 -translate-y-1/2 right-4 h-[60%] w-[100px] z-40 flex items-center justify-end cursor-pointer opacity-0 hover:opacity-100 hover:translate-x-1 transition-all group" onClick={() => pageFlipInstance.current?.flipNext()}>
-              <div className="bg-slate-900/70 backdrop-blur-md border border-white/15 text-white p-4 rounded-full shadow-2xl transition-all group-hover:bg-blue-600/90 group-hover:shadow-[0_0_20px_rgba(37,99,235,0.5)]">
-                <ChevronRight size={36} strokeWidth={2.5} />
-              </div>
-            </div>
-          </>
-        )}
-
         {/* Initial Landing Page */}
         {(appState === 'initializing' || appState === 'ready') && (
           <div className="text-center absolute z-20 w-full max-w-4xl px-4">
-            <div className="bg-slate-900/60 backdrop-blur-xl border-t border-white/20 p-14 rounded-3xl flex flex-col items-center relative overflow-hidden shadow-[0_4px_30px_rgba(0,0,0,0.5)]">
-              <div className="absolute -top-32 -right-32 w-64 h-64 bg-red-600/10 rounded-full blur-3xl pointer-events-none"></div>
-              <div className="absolute -bottom-32 -left-32 w-64 h-64 bg-white/5 rounded-full blur-3xl pointer-events-none"></div>
+            <div className="bg-[#1e293b] border border-slate-700 p-14 rounded-3xl flex flex-col items-center relative overflow-hidden shadow-2xl">
+              <div className="absolute -top-32 -right-32 w-64 h-64 bg-red-600/20 rounded-full blur-3xl pointer-events-none"></div>
+              <div className="absolute -bottom-32 -left-32 w-64 h-64 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
 
               <div className="relative z-10 flex flex-col items-center">
                 <img src="https://www.abkgrooming.com/cdn/shop/files/abk_red_logo.png?v=1729148610&width=200" alt="ABK Imports Logo" className="h-20 object-contain mb-6 drop-shadow-2xl" />
@@ -417,7 +435,7 @@ export default function App() {
                 <button 
                   onClick={loadAbkCatalogue}
                   disabled={appState === 'initializing'}
-                  className="bg-red-600 hover:bg-red-500 disabled:bg-gray-700 disabled:opacity-50 text-white px-10 py-4 rounded-xl font-bold transition-all shadow-[0_0_25px_rgba(220,38,38,0.4)] hover:shadow-[0_0_35px_rgba(220,38,38,0.6)] flex items-center gap-3 transform hover:-translate-y-1 disabled:hover:translate-y-0"
+                  className="bg-red-600 hover:bg-red-500 disabled:bg-slate-700 disabled:text-slate-400 text-white px-10 py-4 rounded-xl font-bold transition-all shadow-[0_0_25px_rgba(220,38,38,0.5)] hover:shadow-[0_0_35px_rgba(220,38,38,0.7)] flex items-center gap-3 transform hover:-translate-y-1 disabled:hover:translate-y-0 disabled:shadow-none"
                 >
                   {appState === 'initializing' ? <Loader2 className="animate-spin" size={22} /> : <BookOpen size={22} />}
                   {appState === 'initializing' ? 'Initializing Engine...' : 'Open Digital Catalogue'}
@@ -427,16 +445,16 @@ export default function App() {
           </div>
         )}
 
-        {/* PageFlip Container DOM Node (React leaves this interior alone after mount) */}
-        <div ref={flipbookRef} className="flip-book shadow-[0_0_20px_0_rgba(0,0,0,0.5)] hidden"></div>
+        {/* PageFlip Container DOM Node (Pixel dimensions managed by resizeBook) */}
+        <div ref={flipbookRef} className="shadow-2xl hidden relative z-10"></div>
         
       </div>
 
       {/* --- Bottom Controls --- */}
       {appState === 'viewing' && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex gap-4 items-center bg-slate-900/60 backdrop-blur-md px-6 py-3 rounded-2xl border border-white/10 shadow-lg">
-          <span className="text-sm font-medium text-gray-400">Page</span>
-          <div className="bg-black/40 px-4 py-1.5 rounded-lg border border-white/10 min-w-[100px] text-center">
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex gap-4 items-center bg-[#0f172a] px-6 py-3 rounded-2xl border border-slate-700 shadow-2xl">
+          <span className="text-sm font-semibold text-gray-400 uppercase tracking-widest">Page</span>
+          <div className="bg-[#1e293b] px-4 py-1.5 rounded-lg border border-slate-600 min-w-[100px] text-center shadow-inner">
             <span className="font-bold text-white font-mono tracking-wider">{getIndicatorText()}</span>
           </div>
         </div>
@@ -444,59 +462,60 @@ export default function App() {
 
       {/* --- Loading Overlay --- */}
       {appState === 'loading_pdf' && (
-        <div className="fixed inset-0 bg-[#0f172a]/98 backdrop-blur-xl z-[200] flex flex-col items-center justify-center">
+        <div className="fixed inset-0 bg-[#0f172a] z-[200] flex flex-col items-center justify-center">
           <div className="relative w-24 h-24 mb-8">
-            <div className="absolute inset-0 border-4 border-white/5 rounded-full"></div>
+            <div className="absolute inset-0 border-4 border-slate-800 rounded-full"></div>
             <div className="absolute inset-0 border-4 border-blue-500 border-t-transparent rounded-full animate-[spin_0.8s_linear_infinite]"></div>
             <div className="absolute inset-0 border-4 border-red-500 border-b-transparent rounded-full animate-[spin_1.2s_linear_infinite_reverse]"></div>
           </div>
-          <h3 className="text-2xl font-bold mb-5 tracking-wide bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">{loadingText}</h3>
-          <div className="w-80 h-2 bg-gray-900 rounded-full overflow-hidden shadow-inner border border-white/5">
+          <h3 className="text-2xl font-bold mb-5 tracking-wide text-white">{loadingText}</h3>
+          <div className="w-80 h-3 bg-slate-800 rounded-full overflow-hidden shadow-inner border border-slate-700">
             <div className="h-full bg-gradient-to-r from-blue-500 via-purple-500 to-red-500 transition-all duration-200" style={{ width: `${loadingProgress}%` }}></div>
           </div>
         </div>
       )}
 
-      {/* --- Exact Selection Implementation: AI Sidebar --- */}
+      {/* --- Exact Selection Implementation: AI Sidebar (Solid & 3D Top Layer) --- */}
       <div 
-        className="fixed top-0 flex flex-col border-l border-white/10 bg-[#0f172a]/98 z-[100] h-screen w-[420px]"
+        className="fixed top-0 flex flex-col border-l-4 border-blue-600 bg-[#0f172a] h-screen w-[420px] shadow-[0_0_50px_rgba(0,0,0,0.8)]"
         style={{
-          boxShadow: '-20px 0 50px rgba(0,0,0,0.5)',
+          zIndex: 9999, // Guaranteed Top Layer
+          transform: 'translateZ(9999px)', // Escapes 3D render context bugs
           transition: 'right 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
           right: isAiOpen ? '0px' : '-450px'
         }}
       >
         {/* Sidebar Header */}
-        <div className="p-5 border-b border-white/10 flex justify-between items-center bg-black/40 backdrop-blur-md">
+        <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-[#1e293b]">
           <div className="flex items-center gap-3 text-blue-400">
-            <div className="p-2 bg-blue-500/20 rounded-lg">
+            <div className="p-2 bg-blue-500/20 border border-blue-500/30 rounded-lg">
               <Sparkles size={20} strokeWidth={2.5} />
             </div>
-            <h3 className="font-bold text-lg text-white">AI Assistant</h3>
+            <h3 className="font-bold text-lg text-white tracking-wide">AI Assistant</h3>
           </div>
-          <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-white/10 rounded-lg transition-colors text-gray-400 hover:text-white">
+          <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-gray-400 hover:text-white">
             <X size={20} strokeWidth={2.5} />
           </button>
         </div>
         
         {/* Sidebar Content Area */}
-        <div className="flex-grow p-6 overflow-y-auto scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+        <div className="flex-grow p-6 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 bg-[#0f172a]">
           {aiContent ? (
-            <div dangerouslySetInnerHTML={{ __html: aiContent }} className="text-[#e2e8f0] text-[0.95rem] leading-relaxed" />
+            <div dangerouslySetInnerHTML={{ __html: aiContent }} className="text-slate-200 text-[0.95rem] leading-relaxed" />
           ) : (
-            <div className="flex flex-col items-center justify-center h-full text-center text-gray-400 mt-20 opacity-60">
-              <Info size={48} strokeWidth={1} className="mb-4" />
-              <p className="max-w-[250px]">Analyze the current spread to instantly extract brands, categories, and SKU data.</p>
+            <div className="flex flex-col items-center justify-center h-full text-center text-slate-500 mt-10">
+              <Info size={56} strokeWidth={1} className="mb-6 opacity-50" />
+              <p className="max-w-[250px] font-medium leading-relaxed">Analyze the current spread to instantly extract brands, categories, and SKU data.</p>
             </div>
           )}
         </div>
         
         {/* Sidebar Footer / Action Button */}
-        <div className="p-5 border-t border-white/10 bg-black/40 backdrop-blur-md">
+        <div className="p-5 border-t border-slate-800 bg-[#1e293b]">
           <button 
             onClick={generateAiSummary}
             disabled={aiLoading}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 disabled:opacity-70 text-white py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.3)] hover:shadow-[0_0_30px_rgba(37,99,235,0.5)] disabled:shadow-none"
+            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:opacity-100 text-white py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.4)] hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] disabled:shadow-none"
           >
             {aiLoading ? (
               <>
