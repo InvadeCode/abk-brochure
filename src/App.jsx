@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Maximize, ChevronLeft, ChevronRight, BookOpen, Loader2 } from 'lucide-react';
+import { Maximize, ChevronLeft, ChevronRight, BookOpen, Loader2, Search, X } from 'lucide-react';
 
 export default function App() {
   // --- App State ---
@@ -10,6 +10,12 @@ export default function App() {
   // --- Flipbook State ---
   const [totalPages, setTotalPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
+  
+  // --- Search State ---
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState([]);
   
   // --- Refs ---
   const flipbookContainerRef = useRef(null);
@@ -101,6 +107,17 @@ export default function App() {
     return () => window.removeEventListener('resize', resizeBook);
   }, []);
 
+  // --- Keyboard Listeners ---
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && isSearchOpen) {
+        setIsSearchOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSearchOpen]);
+
   // --- 2. Load PDF and Build Flipbook ---
   const loadAbkCatalogue = async () => {
     setAppState('loading_pdf');
@@ -108,7 +125,6 @@ export default function App() {
     setLoadingProgress(10);
 
     try {
-      // Since the file is local (/catalogue.pdf), we fetch it directly without any proxies.
       const response = await fetch(pdfUrl);
 
       if (!response || !response.ok) {
@@ -136,7 +152,6 @@ export default function App() {
 
       for (let i = 1; i <= numPages; i++) {
         const pageDiv = document.createElement('div');
-        // Removed global shadow from the container and kept it localized to the page to fix the "white box" artifact when closed
         pageDiv.className = 'page bg-white overflow-hidden shadow-[inset_0_0_20px_rgba(0,0,0,0.05)]';
         
         if (i === 1 || i === numPages) pageDiv.setAttribute('data-density', 'hard');
@@ -162,9 +177,11 @@ export default function App() {
         setLoadingProgress(30 + ((i / numPages) * 70));
       }
 
+      // Initialize with opacity 0 to prevent the visual glitch of the first page swirling/stretching wildly
       flipbookRef.current.style.display = 'block';
+      flipbookRef.current.style.opacity = '0';
 
-      // Ensure dimensions are set rigidly before initializing to prevent the "jumping wide" bug
+      // Ensure dimensions are set rigidly before initializing
       resizeBook();
 
       const isMobile = window.innerWidth < 768;
@@ -172,13 +189,13 @@ export default function App() {
       pageFlipInstance.current = new window.St.PageFlip(flipbookRef.current, {
         width: pageSize.current.width,
         height: pageSize.current.height,
-        size: "stretch", // Preserves aspect ratio dynamically within the bounds we calculated
-        minWidth: 200,   // Lowered to prevent layout breaks on small mobile screens
+        size: "stretch", 
+        minWidth: 200,   
         maxWidth: 2000,
-        minHeight: 300,  // Lowered for mobile
+        minHeight: 300,  
         maxHeight: 3000,
         maxShadowOpacity: 0.6,
-        showCover: !isMobile, // Natively handles the correct centering of the cover (disabled on mobile for 1-page swipe)
+        showCover: !isMobile, 
         mobileScrollSupport: false,
         usePortrait: true,
         flippingTime: 1000
@@ -192,6 +209,14 @@ export default function App() {
       });
 
       setAppState('viewing');
+      
+      // Fade in smoothly after layout is perfectly settled
+      setTimeout(() => {
+        if (flipbookRef.current) {
+          flipbookRef.current.style.transition = 'opacity 0.4s ease-in-out';
+          flipbookRef.current.style.opacity = '1';
+        }
+      }, 150);
       
     } catch (error) {
       console.error(error);
@@ -221,6 +246,52 @@ export default function App() {
     return `${currentPage + 1} / ${totalPages}`;
   };
 
+  // --- 4. OCR Search Logic ---
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    if (!searchQuery.trim() || !pdfDocument.current) return;
+
+    setIsSearching(true);
+    setSearchResults([]);
+    const query = searchQuery.toLowerCase();
+    const results = [];
+
+    try {
+      for (let i = 1; i <= totalPages; i++) {
+        // Yield occasionally to prevent UI freezing
+        if (i % 10 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+
+        const page = await pdfDocument.current.getPage(i);
+        const textContent = await page.getTextContent();
+        
+        // Extract plain text string
+        const pageText = textContent.items.map(item => item.str).join(' ').toLowerCase();
+
+        if (pageText.includes(query)) {
+          results.push(i - 1); // St.PageFlip uses 0-based index
+        }
+      }
+      
+      setSearchResults(results);
+      
+      // If we find exactly one matching result, or just want to jump to the first immediately
+      if (results.length > 0) {
+        pageFlipInstance.current.flip(results[0]);
+      }
+    } catch (err) {
+      console.error("Search extraction failed", err);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const jumpToSearchResult = (pageIndex) => {
+    pageFlipInstance.current?.flip(pageIndex);
+    if (window.innerWidth < 768) {
+      setIsSearchOpen(false); // Auto-hide search panel on mobile
+    }
+  };
+
   return (
     <div className="flex flex-col w-screen h-screen overflow-hidden text-white font-sans bg-[#0f172a] relative">
       {/* Background radial gradients */}
@@ -242,6 +313,16 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-3">
+          {appState === 'viewing' && (
+            <button 
+              onClick={() => setIsSearchOpen(true)} 
+              className="p-2 px-3 rounded-lg bg-blue-600/20 border border-blue-500 hover:bg-blue-600 transition-all text-blue-300 hover:text-white shadow-lg flex items-center gap-2" 
+              title="Search Catalogue"
+            >
+              <Search size={18} />
+              <span className="hidden md:block text-sm font-semibold">Search SKU</span>
+            </button>
+          )}
           <button onClick={toggleFullScreen} className="p-2 rounded-lg bg-[#1e293b] border border-slate-700 hover:bg-slate-700 transition-all text-gray-300 hover:text-white shadow-lg" title="Toggle Fullscreen">
             <Maximize size={18} />
           </button>
@@ -249,7 +330,6 @@ export default function App() {
       </div>
 
       {/* --- Hover Navigation Zones (Desktop Only) --- */}
-      {/* Hidden on mobile (hidden md:flex) to allow native touch-and-swipe gestures */}
       {appState === 'viewing' && (
         <>
           <div className="hidden md:flex absolute top-1/2 -translate-y-1/2 left-4 h-[60%] w-[80px] z-40 items-center justify-start cursor-pointer opacity-0 hover:opacity-100 hover:-translate-x-1 transition-all group" onClick={() => pageFlipInstance.current?.flipPrev()}>
@@ -270,7 +350,7 @@ export default function App() {
       <div 
         ref={flipbookContainerRef}
         className="absolute top-[80px] md:top-[90px] bottom-[80px] md:bottom-[90px] left-[2%] md:left-[3%] right-[2%] md:right-[3%] z-10 flex justify-center items-center"
-        style={{ isolation: 'isolate' }} // Fixes 3D Canvas bleed-through
+        style={{ isolation: 'isolate' }} 
       >
         
         {/* Initial Landing Page */}
@@ -331,6 +411,81 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* --- SKU Search Sidebar --- */}
+      <div 
+        className="fixed top-0 flex flex-col border-l border-slate-700 bg-[#0f172a] z-[300] h-screen w-full sm:w-[420px] shadow-[0_0_50px_rgba(0,0,0,0.8)]"
+        style={{
+          transition: 'right 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+          right: isSearchOpen ? '0px' : '-100%'
+        }}
+      >
+        <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-[#1e293b]">
+          <div className="flex items-center gap-3 text-blue-400">
+            <div className="p-2 bg-blue-500/20 border border-blue-500/30 rounded-lg">
+              <Search size={20} strokeWidth={2.5} />
+            </div>
+            <h3 className="font-bold text-lg text-white tracking-wide">Find SKU</h3>
+          </div>
+          <button onClick={() => setIsSearchOpen(false)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-gray-400 hover:text-white">
+            <X size={20} strokeWidth={2.5} />
+          </button>
+        </div>
+
+        <div className="p-5 border-b border-slate-800 bg-[#1e293b]">
+          <form onSubmit={handleSearch} className="flex gap-2">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="e.g., 631467 or Twistix"
+              className="flex-grow bg-[#0f172a] border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
+            />
+            <button 
+              type="submit" 
+              disabled={isSearching || !searchQuery.trim()} 
+              className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white px-5 py-3 rounded-lg font-bold transition-all shadow-[0_0_15px_rgba(37,99,235,0.4)] disabled:shadow-none"
+            >
+              {isSearching ? <Loader2 size={20} className="animate-spin" /> : 'Search'}
+            </button>
+          </form>
+        </div>
+        
+        <div className="flex-grow p-4 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 bg-[#0f172a]">
+          
+          {isSearching && (
+            <div className="flex flex-col items-center justify-center h-full text-center text-blue-400">
+              <Loader2 size={40} className="animate-spin mb-4" />
+              <p className="font-medium tracking-wide">Scanning {totalPages} pages...</p>
+            </div>
+          )}
+
+          {!isSearching && searchResults.length === 0 && searchQuery && (
+             <div className="text-center text-slate-500 mt-10 p-6">
+                <Search size={48} strokeWidth={1} className="mx-auto mb-4 opacity-30" />
+                <p>No matches found for <strong className="text-slate-300">"{searchQuery}"</strong></p>
+             </div>
+          )}
+
+          {!isSearching && searchResults.length > 0 && (
+            <div className="space-y-3">
+              <p className="text-sm text-slate-400 mb-4 px-2 font-medium">Found in {searchResults.length} page(s):</p>
+              {searchResults.map((pageIndex) => (
+                <button
+                  key={pageIndex}
+                  onClick={() => jumpToSearchResult(pageIndex)}
+                  className="w-full flex items-center justify-between bg-[#1e293b] hover:bg-slate-700 p-4 rounded-xl border border-slate-700 hover:border-slate-500 transition-all group"
+                >
+                  <span className="font-semibold text-white">Jump to Page {pageIndex + 1}</span>
+                  <div className="bg-slate-800 p-1.5 rounded-md group-hover:bg-blue-600 group-hover:text-white transition-colors text-slate-400">
+                    <ChevronRight size={18} />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
 
     </div>
   );
