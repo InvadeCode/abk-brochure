@@ -27,7 +27,6 @@ export default function App() {
   const pageFlipInstance = useRef(null);
   const pdfDocument = useRef(null);
   const pageSize = useRef({ width: 0, height: 0 }); // Store for resize logic
-  const pageTextCache = useRef({}); // INSTANT SEARCH CACHE
 
   const scale = 2.0; // High-res render scale
   const pdfUrl = '/catalogue.pdf';
@@ -118,31 +117,6 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
-
-  // --- Background Text Indexer ---
-  const buildSearchIndex = async (doc, numPages) => {
-    for (let i = 1; i <= numPages; i++) {
-      try {
-        if (pageTextCache.current[i]) continue;
-        const page = await doc.getPage(i);
-        const textContent = await page.getTextContent();
-        
-        // Basic sorting to maintain some spatial relationships
-        textContent.items.sort((a, b) => {
-          if (Math.abs(a.transform[5] - b.transform[5]) > 5) return b.transform[5] - a.transform[5]; // Sort Y
-          return a.transform[4] - b.transform[4]; // Sort X
-        });
-        
-        pageTextCache.current[i] = textContent.items.map(item => item.str).join(' ');
-        
-        // Yield to keep UI smooth
-        if (i % 5 === 0) await new Promise(r => setTimeout(r, 10));
-      } catch (e) {
-        console.warn(`Failed to index page ${i}`, e);
-      }
-    }
-    console.log("Background Search Indexing Complete!");
-  };
 
   // --- 2. Load PDF and Build Flipbook ---
   const loadAbkCatalogue = async () => {
@@ -241,9 +215,6 @@ export default function App() {
         }
       }, 150);
       
-      // Start background indexing for instant search
-      buildSearchIndex(pdfDocument.current, numPages);
-
     } catch (error) {
       console.error(error);
       setAppState('ready');
@@ -293,19 +264,16 @@ export default function App() {
     let text = "";
     for (const pageNum of pagesToExtract) {
       try {
-        if (pageTextCache.current[pageNum]) {
-          text += pageTextCache.current[pageNum] + "\n\n";
-        } else {
-          const page = await pdfDocument.current.getPage(pageNum);
-          const content = await page.getTextContent();
-          text += content.items.map(i => i.str).join(' ') + "\n\n";
-        }
+        const page = await pdfDocument.current.getPage(pageNum);
+        const content = await page.getTextContent();
+        text += content.items.map(i => i.str).join(' ') + "\n\n";
       } catch (e) {
         console.warn(`Could not extract text from page ${pageNum}`);
       }
     }
     return text.trim();
   };
+
 
   // --- AI Insights Spread Summary ---
   useEffect(() => {
@@ -325,7 +293,7 @@ export default function App() {
       }
 
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
       
       const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue. 
       Provide a highly structured summary in Markdown. 
@@ -367,22 +335,16 @@ export default function App() {
     const rawMatches = [];
 
     try {
-      // 1. FAST Local Pass: Use pre-built background index
+      // 1. Initial Pass: Find pages containing the raw query text
       for (let i = 1; i <= totalPages; i++) {
-        let pageText = pageTextCache.current[i];
-        
-        // Fallback if background worker hasn't finished this page yet
-        if (!pageText) {
-          const page = await pdfDocument.current.getPage(i);
-          const textContent = await page.getTextContent();
-          pageText = textContent.items.map(item => item.str).join(' ');
-          pageTextCache.current[i] = pageText;
-        }
+        if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0)); // Prevent freeze
+
+        const page = await pdfDocument.current.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items.map(item => item.str).join(' ');
         
         if (pageText.toLowerCase().includes(query)) {
            rawMatches.push({ pageIndex: i - 1, pageNumber: i, rawText: pageText });
-           // Stop after finding 5 distinct pages to keep extraction blazing fast
-           if (rawMatches.length >= 5) break; 
         }
       }
       
@@ -391,45 +353,44 @@ export default function App() {
         return;
       }
 
-      // 2. AI Intelligence Pass: Reconstruct exact variant details from a targeted text snippet
+      // 2. AI Intelligence Pass: Reconstruct product details from the raw PDF text chunk
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
       
       const structuredResults = [];
 
       for (const match of rawMatches) {
-        // Grab a 1000-character window around the match for context (saves tokens & speeds up API)
-        const matchIdx = match.rawText.toLowerCase().indexOf(query);
-        const snippetStart = Math.max(0, matchIdx - 400);
-        const snippetEnd = Math.min(match.rawText.length, matchIdx + 600);
-        const snippet = match.rawText.substring(snippetStart, snippetEnd);
-
+        // We ask the AI to find the relationship between the queried SKU/Name and the surrounding Product Headers and Variants.
         const prompt = `
           The user searched for: "${query}".
-          Here is a snippet of raw text extracted from a catalogue page where this term was found.
+          Here is raw extracted text from a catalogue page where this search term was found.
           
-          Intelligently reconstruct the product context. Find the main product group, the specific variant, the SKU, and the Price (MRP).
+          Catalogue text formatting is messy, but usually follows a pattern:
+          [Product Group Name] MRP Rs. [Price]
+          [Variant 1 Name] [Variant 2 Name]
+          #[SKU 1] #[SKU 2]
+          
+          Find the exact match for "${query}" in this text. 
+          Then, intelligently reconstruct its parent product context. 
+          
           Respond ONLY with a JSON array of objects matching this exact schema:
           [
             {
-              "sku": "The SKU code (e.g., #631528 or CC1204)",
-              "variantName": "The specific variant (e.g., Biscuit Chicken, Pumpkin Spice Small)",
-              "parentProduct": "The main product header (e.g., Chip Chops (70 gm) or Twistix Dental Treats)",
-              "price": "The price (e.g., Rs. 225.00)"
+              "sku": "The SKU code (e.g., #631528) if applicable",
+              "variantName": "The specific variant name (e.g., Pumpkin Spice Small)",
+              "parentProduct": "The main product header (e.g., Twistix Dental Treats Pouch)",
+              "price": "The price (e.g., Rs. 499.00)"
             }
           ]
-          If you cannot find clear context, provide your best guess based on proximity.
+          If you cannot find clear context, provide your best guess. Return an empty array [] if the query is a false positive.
           
-          RAW SNIPPET:
-          ${snippet}
+          RAW PAGE TEXT:
+          ${match.rawText}
         `;
 
         const payload = {
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { 
-            responseMimeType: "application/json",
-            temperature: 0.1 
-          }
+          generationConfig: { responseMimeType: "application/json" }
         };
 
         try {
@@ -443,25 +404,25 @@ export default function App() {
           if (aiResult.candidates && aiResult.candidates[0].content.parts[0].text) {
              const parsedData = JSON.parse(aiResult.candidates[0].content.parts[0].text);
              if (parsedData && parsedData.length > 0) {
-               // Only take the first item that matches closely
                structuredResults.push({
                  pageIndex: match.pageIndex,
                  pageNumber: match.pageNumber,
-                 details: parsedData[0] 
+                 details: parsedData[0] // Taking the best first match
                });
              } else {
+               // Fallback if AI couldn't reconstruct context but text was found
                structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null });
              }
           }
         } catch (aiErr) {
           console.error("AI Context extraction failed for page", match.pageNumber, aiErr);
+          // Fallback
           structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null });
         }
       }
       
       setSearchResults(structuredResults);
       
-      // Auto-jump if there's exactly 1 perfect match
       if (structuredResults.length === 1) {
         jumpToSearchResult(structuredResults[0].pageIndex);
       }
