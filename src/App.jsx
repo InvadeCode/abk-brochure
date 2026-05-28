@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Maximize, ChevronLeft, ChevronRight, BookOpen, Loader2, Search, X } from 'lucide-react';
+import { Maximize, ChevronLeft, ChevronRight, BookOpen, Loader2, Search, X, Sparkles, Info } from 'lucide-react';
 
 export default function App() {
   // --- App State ---
@@ -11,11 +11,15 @@ export default function App() {
   const [totalPages, setTotalPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
   
-  // --- Search State ---
+  // --- Search & AI State ---
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
+  
+  const [isAiOpen, setIsAiOpen] = useState(false);
+  const [aiStatus, setAiStatus] = useState('idle'); 
+  const [aiResult, setAiResult] = useState('');
   
   // --- Refs ---
   const flipbookContainerRef = useRef(null);
@@ -25,8 +29,6 @@ export default function App() {
   const pageSize = useRef({ width: 0, height: 0 }); // Store for resize logic
 
   const scale = 2.0; // High-res render scale
-  
-  // Using the local public file directly for instant loading
   const pdfUrl = '/catalogue.pdf';
 
   // --- 1. Load External Scripts ---
@@ -47,7 +49,8 @@ export default function App() {
       try {
         await Promise.all([
           loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'),
-          loadScript('https://cdn.jsdelivr.net/npm/page-flip/dist/js/page-flip.browser.js')
+          loadScript('https://cdn.jsdelivr.net/npm/page-flip/dist/js/page-flip.browser.js'),
+          loadScript('https://cdn.jsdelivr.net/npm/marked/marked.min.js')
         ]);
         
         window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -68,7 +71,7 @@ export default function App() {
     };
   }, []);
 
-  // --- Layout Engine (Fixes Cropping, Overlap & Mobile Responsiveness) ---
+  // --- Layout Engine ---
   const resizeBook = () => {
     if (!flipbookContainerRef.current || !flipbookRef.current || !pageSize.current.width) return;
     
@@ -78,14 +81,11 @@ export default function App() {
     const cWidth = container.clientWidth;
     const cHeight = container.clientHeight;
     
-    // Detect mobile device to force single page (portrait) aspect ratio
     const isMobile = window.innerWidth < 768;
-    // ALWAYS force a 2-page target ratio for desktop, 1-page for mobile
     const targetRatio = isMobile ? (baseW / baseH) : ((baseW * 2) / baseH);
     
     let finalWidth, finalHeight;
     
-    // Fit perfectly within the safe container boundaries while maintaining strict ratio
     if (cWidth / cHeight > targetRatio) {
       finalHeight = cHeight;
       finalWidth = cHeight * targetRatio;
@@ -94,7 +94,6 @@ export default function App() {
       finalHeight = cWidth / targetRatio;
     }
     
-    // Apply exact safe pixel boundaries
     flipbookRef.current.style.width = `${finalWidth}px`;
     flipbookRef.current.style.height = `${finalHeight}px`;
     
@@ -108,16 +107,16 @@ export default function App() {
     return () => window.removeEventListener('resize', resizeBook);
   }, []);
 
-  // --- Keyboard Listeners ---
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape' && isSearchOpen) {
+      if (e.key === 'Escape') {
         setIsSearchOpen(false);
+        setIsAiOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isSearchOpen]);
+  }, []);
 
   // --- 2. Load PDF and Build Flipbook ---
   const loadAbkCatalogue = async () => {
@@ -178,11 +177,9 @@ export default function App() {
         setLoadingProgress(30 + ((i / numPages) * 70));
       }
 
-      // Initialize with opacity 0 to prevent the visual glitch of the first page swirling/stretching wildly
       flipbookRef.current.style.display = 'block';
       flipbookRef.current.style.opacity = '0';
 
-      // Ensure dimensions are set rigidly before initializing
       resizeBook();
 
       const isMobile = window.innerWidth < 768;
@@ -195,11 +192,11 @@ export default function App() {
         maxWidth: 2000,
         minHeight: 300,  
         maxHeight: 3000,
-        maxShadowOpacity: 0.8, // Increased for a deeper, more realistic spine shadow
-        showCover: true, // Always true to ensure the engine calculates the first page as a right-side single block
+        maxShadowOpacity: 0.6,
+        showCover: !isMobile, 
         mobileScrollSupport: false,
-        usePortrait: isMobile, // Explicitly force portrait ONLY on mobile
-        flippingTime: 1200 // Slightly slowed down for a smoother, less glitchy turn
+        usePortrait: true,
+        flippingTime: 1000
       });
 
       pageFlipInstance.current.loadFromHTML(flipbookRef.current.querySelectorAll('.page'));
@@ -211,7 +208,6 @@ export default function App() {
 
       setAppState('viewing');
       
-      // Fade in smoothly after layout is perfectly settled
       setTimeout(() => {
         if (flipbookRef.current) {
           flipbookRef.current.style.transition = 'opacity 0.4s ease-in-out';
@@ -226,7 +222,6 @@ export default function App() {
     }
   };
 
-  // --- 3. UI Helpers ---
   const toggleFullScreen = () => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(err => console.error(err));
@@ -243,65 +238,197 @@ export default function App() {
       if (currentPage >= totalPages - 1) return `Back Cover / ${totalPages}`;
       return `${currentPage + 1} - ${Math.min(currentPage + 2, totalPages)} / ${totalPages}`;
     }
-    // Portrait mode (Mobile single page)
     return `${currentPage + 1} / ${totalPages}`;
   };
 
-  // --- 4. Super Smart OCR Search Logic ---
+  // --- PDF Text Extraction Utility ---
+  const extractTextFromVisiblePages = async () => {
+    if (!pdfDocument.current || !pageFlipInstance.current) return "";
+    
+    const orientation = pageFlipInstance.current.getOrientation();
+    let pagesToExtract = [];
+    
+    if (orientation === 'portrait') {
+      pagesToExtract.push(currentPage + 1);
+    } else {
+      if (currentPage === 0) {
+        pagesToExtract.push(1);
+      } else if (currentPage >= totalPages - 1) {
+        pagesToExtract.push(totalPages);
+      } else {
+        pagesToExtract.push(currentPage + 1);
+        if (currentPage + 2 <= totalPages) pagesToExtract.push(currentPage + 2);
+      }
+    }
+
+    let text = "";
+    for (const pageNum of pagesToExtract) {
+      try {
+        const page = await pdfDocument.current.getPage(pageNum);
+        const content = await page.getTextContent();
+        text += content.items.map(i => i.str).join(' ') + "\n\n";
+      } catch (e) {
+        console.warn(`Could not extract text from page ${pageNum}`);
+      }
+    }
+    return text.trim();
+  };
+
+
+  // --- AI Insights Spread Summary ---
+  useEffect(() => {
+    if (isAiOpen) {
+      setAiStatus('idle');
+      setAiResult('');
+    }
+  }, [currentPage, isAiOpen]);
+
+  const generateAiSummary = async () => {
+    setAiStatus('scanning');
+    try {
+      const text = await extractTextFromVisiblePages();
+      if (!text || text.length < 15) {
+        setAiStatus('insufficient');
+        return;
+      }
+
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+      
+      const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue. 
+      Provide a highly structured summary in Markdown. 
+      Focus on: Brands, Product Categories, and general pricing or features mentioned. 
+      Be concise.
+      
+      RAW TEXT:\n${text}`;
+
+      const payload = {
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: "You are an AI assistant for a B2B pet supply distributor. Output strictly in well-formatted Markdown." }] }
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (!result.candidates) throw new Error("API failed.");
+
+      setAiResult(result.candidates[0].content.parts[0].text);
+      setAiStatus('success');
+
+    } catch (error) {
+      console.error(error);
+      setAiStatus('error');
+    }
+  };
+
+  // --- Super Smart AI Contextual Search ---
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!searchQuery.trim() || !pdfDocument.current) return;
 
     setIsSearching(true);
     setSearchResults([]);
-    const query = searchQuery.trim();
-    // Escape regex characters to safely search for SKUs with dashes/special chars
-    const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const searchRegex = new RegExp(safeQuery, 'gi');
-    const results = [];
+    const query = searchQuery.toLowerCase().trim();
+    const rawMatches = [];
 
     try {
+      // 1. Initial Pass: Find pages containing the raw query text
       for (let i = 1; i <= totalPages; i++) {
-        // Yield occasionally to prevent UI freezing
-        if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0)); // Prevent freeze
 
         const page = await pdfDocument.current.getPage(i);
         const textContent = await page.getTextContent();
-        
-        // Extract plain text string while preserving basic spacing
         const pageText = textContent.items.map(item => item.str).join(' ');
         
-        // Find all occurrences on the page
-        const matches = [...pageText.matchAll(searchRegex)];
-
-        if (matches.length > 0) {
-          const firstMatch = matches[0];
-          
-          // Extract a ~90 character snippet around the first match for context
-          const start = Math.max(0, firstMatch.index - 45);
-          const end = Math.min(pageText.length, firstMatch.index + query.length + 45);
-          
-          let snippet = pageText.substring(start, end);
-          if (start > 0) snippet = '...' + snippet;
-          if (end < pageText.length) snippet = snippet + '...';
-
-          results.push({
-            pageIndex: i - 1, // St.PageFlip uses 0-based index
-            pageNumber: i,
-            matchCount: matches.length,
-            snippet: snippet // Keep raw string, highlight later via React Component
-          });
+        if (pageText.toLowerCase().includes(query)) {
+           rawMatches.push({ pageIndex: i - 1, pageNumber: i, rawText: pageText });
         }
       }
       
-      setSearchResults(results);
-      
-      // Auto-jump if there is exactly 1 highly specific match
-      if (results.length === 1) {
-        jumpToSearchResult(results[0].pageIndex);
+      if (rawMatches.length === 0) {
+        setIsSearching(false);
+        return;
       }
+
+      // 2. AI Intelligence Pass: Reconstruct product details from the raw PDF text chunk
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+      
+      const structuredResults = [];
+
+      for (const match of rawMatches) {
+        // We ask the AI to find the relationship between the queried SKU/Name and the surrounding Product Headers and Variants.
+        const prompt = `
+          The user searched for: "${query}".
+          Here is raw extracted text from a catalogue page where this search term was found.
+          
+          Catalogue text formatting is messy, but usually follows a pattern:
+          [Product Group Name] MRP Rs. [Price]
+          [Variant 1 Name] [Variant 2 Name]
+          #[SKU 1] #[SKU 2]
+          
+          Find the exact match for "${query}" in this text. 
+          Then, intelligently reconstruct its parent product context. 
+          
+          Respond ONLY with a JSON array of objects matching this exact schema:
+          [
+            {
+              "sku": "The SKU code (e.g., #631528) if applicable",
+              "variantName": "The specific variant name (e.g., Pumpkin Spice Small)",
+              "parentProduct": "The main product header (e.g., Twistix Dental Treats Pouch)",
+              "price": "The price (e.g., Rs. 499.00)"
+            }
+          ]
+          If you cannot find clear context, provide your best guess. Return an empty array [] if the query is a false positive.
+          
+          RAW PAGE TEXT:
+          ${match.rawText}
+        `;
+
+        const payload = {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json" }
+        };
+
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const aiResult = await response.json();
+          
+          if (aiResult.candidates && aiResult.candidates[0].content.parts[0].text) {
+             const parsedData = JSON.parse(aiResult.candidates[0].content.parts[0].text);
+             if (parsedData && parsedData.length > 0) {
+               structuredResults.push({
+                 pageIndex: match.pageIndex,
+                 pageNumber: match.pageNumber,
+                 details: parsedData[0] // Taking the best first match
+               });
+             } else {
+               // Fallback if AI couldn't reconstruct context but text was found
+               structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null });
+             }
+          }
+        } catch (aiErr) {
+          console.error("AI Context extraction failed for page", match.pageNumber, aiErr);
+          // Fallback
+          structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null });
+        }
+      }
+      
+      setSearchResults(structuredResults);
+      
+      if (structuredResults.length === 1) {
+        jumpToSearchResult(structuredResults[0].pageIndex);
+      }
+      
     } catch (err) {
-      console.error("Search extraction failed", err);
+      console.error("Search failed", err);
     } finally {
       setIsSearching(false);
     }
@@ -310,35 +437,29 @@ export default function App() {
   const jumpToSearchResult = (pageIndex) => {
     pageFlipInstance.current?.flip(pageIndex);
     if (window.innerWidth < 768) {
-      setIsSearchOpen(false); // Auto-hide search panel on mobile
+      setIsSearchOpen(false);
     }
   };
 
-  // Safe Highlighting Component
-  const HighlightedText = ({ text, highlight }) => {
-    if (!highlight.trim()) return <span>{text}</span>;
-    // Create a regex to split the text by the search query (case-insensitive)
-    const regex = new RegExp(`(${highlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-    const parts = text.split(regex);
-    
-    return (
-      <span>
-        {parts.map((part, i) => 
-          regex.test(part) ? (
-            <mark key={i} className="bg-blue-500/40 text-blue-100 rounded px-1 font-bold border border-blue-500/50">
-              {part}
-            </mark>
-          ) : (
-            <span key={i}>{part}</span>
-          )
-        )}
-      </span>
-    );
-  };
+  // --- CSS Overrides for Markdown injected content ---
+  const markdownStyles = `
+    @keyframes slideFadeIn {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-slide-fade {
+      animation: slideFadeIn 0.5s ease-out forwards;
+    }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3 { color: white; font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; border-bottom: 1px solid #334155; padding-bottom: 0.3em;}
+    .markdown-body p { margin-bottom: 1em; }
+    .markdown-body ul { list-style-type: disc; padding-left: 1.5em; margin-bottom: 1em; color: #cbd5e1; }
+    .markdown-body li { margin-bottom: 0.25em; }
+    .markdown-body strong { color: #60a5fa; font-weight: 600; }
+  `;
 
   return (
     <div className="flex flex-col w-screen h-screen overflow-hidden text-white font-sans bg-[#0f172a] relative">
-      {/* Background radial gradients */}
+      <style dangerouslySetInnerHTML={{ __html: markdownStyles }} />
       <div className="absolute inset-0 z-0 pointer-events-none" style={{
         backgroundImage: `
           radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
@@ -358,14 +479,23 @@ export default function App() {
 
         <div className="flex items-center gap-3">
           {appState === 'viewing' && (
-            <button 
-              onClick={() => setIsSearchOpen(true)} 
-              className="p-2 px-3 rounded-lg bg-blue-600/20 border border-blue-500 hover:bg-blue-600 transition-all text-blue-300 hover:text-white shadow-lg flex items-center gap-2" 
-              title="Search Catalogue"
-            >
-              <Search size={18} />
-              <span className="hidden md:block text-sm font-semibold">Search Catalogue</span>
-            </button>
+            <>
+              <button 
+                onClick={() => { setIsSearchOpen(true); setIsAiOpen(false); }} 
+                className="p-2 px-3 rounded-lg bg-[#1e293b] border border-slate-700 hover:bg-slate-700 transition-all text-gray-300 hover:text-white shadow-lg flex items-center gap-2" 
+                title="Search Catalogue"
+              >
+                <Search size={18} />
+                <span className="hidden md:block text-sm font-semibold">Search Catalogue</span>
+              </button>
+              <button 
+                onClick={() => { setIsAiOpen(true); setIsSearchOpen(false); }} 
+                className="bg-blue-600/20 border border-blue-500/40 text-blue-300 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-600 hover:text-white transition-all flex items-center gap-2 shadow-[0_0_15px_rgba(37,99,235,0.2)]"
+              >
+                <Sparkles size={16} />
+                <span className="hidden md:block">AI Insights</span>
+              </button>
+            </>
           )}
           <button onClick={toggleFullScreen} className="p-2 rounded-lg bg-[#1e293b] border border-slate-700 hover:bg-slate-700 transition-all text-gray-300 hover:text-white shadow-lg" title="Toggle Fullscreen">
             <Maximize size={18} />
@@ -390,14 +520,13 @@ export default function App() {
         </>
       )}
 
-      {/* --- Main Scene Area (Isolated and perfectly bound) --- */}
+      {/* --- Main Scene Area --- */}
       <div 
         ref={flipbookContainerRef}
         className="absolute top-[80px] md:top-[90px] bottom-[80px] md:bottom-[90px] left-[2%] md:left-[3%] right-[2%] md:right-[3%] z-10 flex justify-center items-center"
         style={{ isolation: 'isolate' }} 
       >
         
-        {/* Initial Landing Page */}
         {(appState === 'initializing' || appState === 'ready') && (
           <div className="text-center absolute z-20 w-full max-w-4xl px-4">
             <div className="bg-[#1e293b] border border-slate-700 p-8 md:p-14 rounded-3xl flex flex-col items-center relative overflow-hidden shadow-2xl">
@@ -426,14 +555,7 @@ export default function App() {
           </div>
         )}
 
-        {/* PageFlip Container DOM Node */}
-        {/* Removed relative drop-shadows that conflicted with the engine's internal shadow calculation */}
-        <div ref={flipbookRef} className="hidden relative z-10 w-full h-full mx-auto" style={{
-          /* This ensures that when closed on page 1, the single page sits perfectly centered in the 2-page container */
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center'
-        }}></div>
+        <div ref={flipbookRef} className="hidden relative z-10 drop-shadow-2xl"></div>
         
       </div>
 
@@ -462,7 +584,7 @@ export default function App() {
         </div>
       )}
 
-      {/* --- SKU Search Sidebar --- */}
+      {/* --- AI Smart Search Sidebar --- */}
       <div 
         className="fixed top-0 flex flex-col border-l border-slate-700 bg-[#0f172a] z-[300] h-screen w-full sm:w-[420px] shadow-[0_0_50px_rgba(0,0,0,0.8)]"
         style={{
@@ -475,7 +597,7 @@ export default function App() {
             <div className="p-2 bg-blue-500/20 border border-blue-500/30 rounded-lg">
               <Search size={20} strokeWidth={2.5} />
             </div>
-            <h3 className="font-bold text-lg text-white tracking-wide">Find SKU or Product</h3>
+            <h3 className="font-bold text-lg text-white tracking-wide">AI Smart Search</h3>
           </div>
           <button onClick={() => setIsSearchOpen(false)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-gray-400 hover:text-white">
             <X size={20} strokeWidth={2.5} />
@@ -488,7 +610,7 @@ export default function App() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="e.g., Twistix or 631528"
+              placeholder="SKU or Product Name (e.g. 631528)"
               className="flex-grow bg-[#0f172a] border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
             />
             <button 
@@ -506,7 +628,7 @@ export default function App() {
           {isSearching && (
             <div className="flex flex-col items-center justify-center h-full text-center text-blue-400">
               <Loader2 size={40} className="animate-spin mb-4" />
-              <p className="font-medium tracking-wide">Scanning {totalPages} pages using OCR...</p>
+              <p className="font-medium tracking-wide">Extracting & Analyzing context...</p>
             </div>
           )}
 
@@ -518,40 +640,128 @@ export default function App() {
           )}
 
           {!isSearching && searchResults.length > 0 && (
-            <div className="space-y-4">
+            <div className="space-y-4 animate-slide-fade">
               <p className="text-sm text-slate-400 mb-4 px-1 font-medium flex items-center justify-between">
-                <span>Found in {searchResults.length} page(s)</span>
-                <span className="text-xs bg-slate-800 px-2 py-1 rounded-full border border-slate-700">Exact Match</span>
+                <span>Found in {searchResults.length} location(s)</span>
+                <span className="text-xs bg-blue-600/20 text-blue-400 px-2 py-1 rounded-full border border-blue-500/30">AI Analyzed</span>
               </p>
               
               {searchResults.map((result, idx) => (
                 <button
                   key={idx}
                   onClick={() => jumpToSearchResult(result.pageIndex)}
-                  className="w-full text-left bg-[#1e293b] hover:bg-slate-800 p-4 rounded-xl border border-slate-700 hover:border-blue-500/50 transition-all group flex flex-col gap-3 shadow-lg"
+                  className="w-full text-left bg-[#1e293b] hover:bg-slate-800 p-0 rounded-xl border border-slate-700 hover:border-blue-500/50 transition-all group flex flex-col shadow-lg overflow-hidden relative"
                 >
-                  <div className="flex items-center justify-between w-full border-b border-slate-700/50 pb-2">
-                    <span className="font-bold text-white flex items-center gap-2">
-                      <BookOpen size={16} className="text-blue-400" />
-                      Page {result.pageNumber}
+                  <div className="bg-slate-900/50 p-3 px-4 flex justify-between items-center border-b border-slate-700/50">
+                    <span className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                       <BookOpen size={14} className="text-blue-400" />
+                       Page {result.pageNumber}
                     </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-slate-400 bg-slate-900 px-2 py-1 rounded-md">
-                        {result.matchCount} match{result.matchCount > 1 ? 'es' : ''}
-                      </span>
-                      <div className="bg-slate-800 p-1 rounded-md group-hover:bg-blue-600 group-hover:text-white transition-colors text-slate-400">
-                        <ChevronRight size={16} strokeWidth={3} />
-                      </div>
-                    </div>
+                    <ChevronRight size={16} className="text-slate-500 group-hover:text-blue-400 transition-colors" />
                   </div>
                   
-                  <div className="text-sm text-slate-300 leading-relaxed italic bg-slate-900/50 p-3 rounded-lg border border-slate-800/50 shadow-inner">
-                    <HighlightedText text={`"...${result.snippet.replace(/^\.\.\.|\.\.\.$/g, '')}..."`} highlight={searchQuery} />
+                  <div className="p-4 flex flex-col gap-2">
+                    {result.details ? (
+                      <>
+                        {result.details.parentProduct && (
+                          <h4 className="font-bold text-white leading-tight">{result.details.parentProduct}</h4>
+                        )}
+                        {result.details.variantName && (
+                          <div className="text-sm text-blue-300 font-medium">Variant: {result.details.variantName}</div>
+                        )}
+                        <div className="flex items-center gap-3 mt-1">
+                          {result.details.sku && (
+                             <span className="bg-slate-800 border border-slate-600 text-slate-300 text-xs px-2 py-1 rounded font-mono">
+                               SKU: {result.details.sku}
+                             </span>
+                          )}
+                          {result.details.price && (
+                             <span className="text-green-400 text-sm font-bold">{result.details.price}</span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-sm text-slate-400 italic">
+                         Exact match found, but detailed product context could not be confidently reconstructed from the raw text layout.
+                      </div>
+                    )}
                   </div>
                 </button>
               ))}
             </div>
           )}
+        </div>
+      </div>
+      
+      {/* --- AI Insights Sidebar (Page Summary) --- */}
+      <div 
+        className="fixed top-0 flex flex-col border-l-4 border-blue-600 bg-[#0f172a] h-screen w-[420px] shadow-[0_0_50px_rgba(0,0,0,0.8)]"
+        style={{
+          zIndex: 9999,
+          transform: 'translateZ(9999px)',
+          transition: 'right 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+          right: isAiOpen ? '0px' : '-450px'
+        }}
+      >
+        <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-[#1e293b]">
+          <div className="flex items-center gap-3 text-blue-400">
+            <div className="p-2 bg-blue-500/20 border border-blue-500/30 rounded-lg">
+              <Sparkles size={20} strokeWidth={2.5} />
+            </div>
+            <h3 className="font-bold text-lg text-white tracking-wide">AI Page Insights</h3>
+          </div>
+          <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-gray-400 hover:text-white">
+            <X size={20} strokeWidth={2.5} />
+          </button>
+        </div>
+        
+        <div className="flex-grow p-6 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 bg-[#0f172a]">
+          {aiStatus === 'idle' && (
+            <div className="flex flex-col items-center justify-center h-full text-center text-slate-500 mt-10">
+              <Info size={56} strokeWidth={1} className="mb-6 opacity-50" />
+              <p className="max-w-[250px] font-medium leading-relaxed">Analyze the current spread to instantly extract brands, categories, and SKU data.</p>
+            </div>
+          )}
+
+          {aiStatus === 'scanning' && (
+            <div className="flex flex-col items-center justify-center h-full text-center text-blue-400 mt-10">
+              <Loader2 size={48} className="animate-spin mb-6" />
+              <p className="font-medium tracking-wide">Scanning Catalogue...</p>
+            </div>
+          )}
+
+          {aiStatus === 'insufficient' && (
+            <div className="bg-[#1e293b] p-5 rounded-xl border border-slate-700 text-center shadow-inner mt-4">
+                <p className="text-gray-300 font-medium">Insufficient text found on this spread. It appears to be primarily visual.</p>
+            </div>
+          )}
+
+          {aiStatus === 'error' && (
+            <div className="bg-red-900/30 text-red-400 p-5 rounded-xl border border-red-800/80 flex items-center gap-3 mt-4">
+                Failed to generate insights. Please try again.
+            </div>
+          )}
+
+          {aiStatus === 'success' && (
+            <div dangerouslySetInnerHTML={{ __html: window.marked ? window.marked.parse(aiResult) : aiResult }} className="markdown-body animate-slide-fade" />
+          )}
+        </div>
+        
+        <div className="p-5 border-t border-slate-800 bg-[#1e293b]">
+          <button 
+            onClick={generateAiSummary}
+            disabled={aiStatus === 'scanning'}
+            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:opacity-100 text-white py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.4)] hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] disabled:shadow-none"
+          >
+            {aiStatus === 'scanning' ? (
+              <>
+                <Loader2 className="animate-spin" size={20} />
+                <span>Scanning Catalogue...</span>
+              </>
+            ) : (
+              <span>Scan Current Spread</span>
+            )}
+          </button>
         </div>
       </div>
 
