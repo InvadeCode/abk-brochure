@@ -28,7 +28,8 @@ export default function App() {
   const pdfDocument = useRef(null);
   const pageSize = useRef({ width: 0, height: 0 }); // Store for resize logic
 
-  const scale = 2.0; // High-res render scale
+  const renderedPages = useRef(new Set());
+  const renderScaleRef = useRef(1.5);
   const pdfUrl = '/catalogue.pdf';
 
   // --- 1. Load External Scripts ---
@@ -118,6 +119,27 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // --- Lazy Rendering Engine ---
+  const renderPdfPage = async (pageNum, canvas) => {
+    if (!pdfDocument.current || renderedPages.current.has(pageNum)) return;
+    renderedPages.current.add(pageNum);
+    try {
+      const page = await pdfDocument.current.getPage(pageNum);
+      const viewport = page.getViewport({ scale: renderScaleRef.current });
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      
+      // Remove loading skeleton once rendered
+      const loader = canvas.parentElement.querySelector('.loader-spinner');
+      if (loader) loader.remove();
+    } catch (error) {
+      console.warn(`Render failed for page ${pageNum}`, error);
+      renderedPages.current.delete(pageNum);
+    }
+  };
+
   // --- 2. Load PDF and Build Flipbook ---
   const loadAbkCatalogue = async () => {
     setAppState('loading_pdf');
@@ -143,8 +165,12 @@ export default function App() {
       const numPages = pdfDocument.current.numPages;
       setTotalPages(numPages);
 
-      setLoadingText("Rendering high-res pages...");
+      setLoadingText("Rendering initial pages...");
       if (flipbookRef.current) flipbookRef.current.innerHTML = '';
+
+      const isMobile = window.innerWidth < 768;
+      renderScaleRef.current = isMobile ? 1.0 : 1.5; // Drop scale on mobile to prevent memory crash
+      renderedPages.current.clear();
 
       const page1 = await pdfDocument.current.getPage(1);
       const viewport1 = page1.getViewport({ scale: 1 });
@@ -157,32 +183,45 @@ export default function App() {
         if (i === 1 || i === numPages) pageDiv.setAttribute('data-density', 'hard');
 
         const contentDiv = document.createElement('div');
-        contentDiv.className = 'page-content w-full h-full flex justify-center items-center bg-white';
+        contentDiv.className = 'page-content w-full h-full flex justify-center items-center bg-white relative';
 
         const canvas = document.createElement('canvas');
-        canvas.className = 'w-full h-full object-fill bg-white';
+        canvas.className = 'w-full h-full object-fill bg-white pdf-canvas';
+        canvas.dataset.pageNum = i;
         
-        const page = await pdfDocument.current.getPage(i);
-        const viewport = page.getViewport({ scale });
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
+        if (i <= 6) {
+          // Only allocate memory & render the first 6 pages upfront
+          const page = await pdfDocument.current.getPage(i);
+          const viewport = page.getViewport({ scale: renderScaleRef.current });
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
 
-        const ctx = canvas.getContext('2d');
-        await page.render({ canvasContext: ctx, viewport }).promise;
+          const ctx = canvas.getContext('2d');
+          await page.render({ canvasContext: ctx, viewport }).promise;
+          renderedPages.current.add(i);
+        } else {
+          // Skeleton loader for unrendered pages (takes practically 0 memory)
+          const loader = document.createElement('div');
+          loader.className = 'absolute inset-0 flex items-center justify-center text-slate-300 loader-spinner';
+          loader.innerHTML = '<svg class="animate-spin h-8 w-8" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+          contentDiv.appendChild(loader);
+        }
 
         contentDiv.appendChild(canvas);
         pageDiv.appendChild(contentDiv);
         flipbookRef.current.appendChild(pageDiv);
 
-        setLoadingProgress(30 + ((i / numPages) * 70));
+        if (i % 10 === 0) {
+            setLoadingProgress(30 + ((i / numPages) * 70));
+            await new Promise(resolve => setTimeout(resolve, 0)); // Yield to keep UI from freezing
+        }
       }
 
+      setLoadingProgress(100);
       flipbookRef.current.style.display = 'block';
       flipbookRef.current.style.opacity = '0';
 
       resizeBook();
-
-      const isMobile = window.innerWidth < 768;
 
       pageFlipInstance.current = new window.St.PageFlip(flipbookRef.current, {
         width: pageSize.current.width,
@@ -201,7 +240,25 @@ export default function App() {
 
       pageFlipInstance.current.loadFromHTML(flipbookRef.current.querySelectorAll('.page'));
 
-      pageFlipInstance.current.on('flip', (e) => setCurrentPage(e.data));
+      pageFlipInstance.current.on('flip', (e) => {
+        const newPageIdx = e.data;
+        setCurrentPage(newPageIdx);
+        
+        // Lazy load the next few pages smoothly in the background as the user flips
+        const targetPage = newPageIdx + 1;
+        const pagesToRender = [
+          targetPage - 2, targetPage - 1, targetPage, 
+          targetPage + 1, targetPage + 2, targetPage + 3, targetPage + 4
+        ];
+        
+        pagesToRender.forEach(pageNum => {
+          if (pageNum >= 1 && pageNum <= numPages && !renderedPages.current.has(pageNum)) {
+             const canvas = flipbookRef.current.querySelector(`.pdf-canvas[data-page-num="${pageNum}"]`);
+             if (canvas) renderPdfPage(pageNum, canvas);
+          }
+        });
+      });
+
       pageFlipInstance.current.on('changeState', (e) => {
         if (e.data === 'read') setCurrentPage(pageFlipInstance.current.getCurrentPageIndex());
       });
