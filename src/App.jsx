@@ -1,6 +1,30 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Maximize, ChevronLeft, ChevronRight, BookOpen, Loader2, Search, X, Sparkles, Info } from 'lucide-react';
 
+// --- Global Utilities for Text Normalization ---
+const normalizeText = (value) => {
+  if (!value) return "";
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+const normalizeSku = (value) => {
+  if (!value) return "";
+  return value
+    .normalize("NFKC")
+    .replace(/\D/g, "");
+};
+
+const buildLooseSkuRegex = (sku) => {
+  const digits = normalizeSku(sku).split("");
+  if (digits.length === 0) return null;
+  return new RegExp(digits.join("\\D*"), "i");
+};
+
 export default function App() {
   // --- App State ---
   const [appState, setAppState] = useState('initializing'); // initializing, ready, loading_pdf, viewing
@@ -20,6 +44,10 @@ export default function App() {
   const [isAiOpen, setIsAiOpen] = useState(false);
   const [aiStatus, setAiStatus] = useState('idle'); 
   const [aiResult, setAiResult] = useState('');
+
+  // --- Background Indexing State ---
+  const [skuIndex, setSkuIndex] = useState({});
+  const [isIndexing, setIsIndexing] = useState(false);
   
   // --- Refs ---
   const flipbookContainerRef = useRef(null);
@@ -30,6 +58,9 @@ export default function App() {
 
   const renderedPages = useRef(new Set());
   const renderScaleRef = useRef(1.5);
+  
+  // Use an absolute URL for the PDF to avoid fetch parse errors in sandboxed preview environments.
+  // Replace this with your actual absolute URL when deploying (e.g. 'https://yourwebsite.com/catalogue.pdf')
   const pdfUrl = '/catalogue.pdf';
 
   // --- 1. Load External Scripts ---
@@ -119,6 +150,37 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // --- Background Search Index Builder ---
+  const buildSearchIndex = async (pdfDoc, numPages) => {
+    setIsIndexing(true);
+    const index = {};
+    
+    try {
+      for (let i = 1; i <= numPages; i++) {
+        // Yield heavily to UI to prevent freezing while reading
+        if (i % 2 === 0) await new Promise(resolve => setTimeout(resolve, 10)); 
+        
+        const page = await pdfDoc.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items.map(item => item.str).join(" ");
+        const compactText = textContent.items.map(item => item.str).join("");
+
+        index[i] = {
+          pageNumber: i,
+          rawText: pageText,
+          normalizedText: normalizeText(pageText),
+          compactText: normalizeText(compactText),
+          numericText: normalizeSku(pageText + compactText)
+        };
+      }
+      setSkuIndex(index);
+    } catch (e) {
+      console.warn("Background index build encountered an issue:", e);
+    } finally {
+      setIsIndexing(false);
+    }
+  };
+
   // --- Lazy Rendering Engine ---
   const renderPdfPage = async (pageNum, canvas) => {
     if (!pdfDocument.current || renderedPages.current.has(pageNum)) return;
@@ -150,7 +212,7 @@ export default function App() {
       const response = await fetch(pdfUrl);
 
       if (!response || !response.ok) {
-         throw new Error(`Failed to fetch the local PDF. Ensure /catalogue.pdf exists in the public directory.`);
+         throw new Error(`Failed to fetch the PDF. Please check the URL.`);
       }
       
       const arrayBuffer = await response.arrayBuffer();
@@ -200,7 +262,7 @@ export default function App() {
           await page.render({ canvasContext: ctx, viewport }).promise;
           renderedPages.current.add(i);
         } else {
-          // Skeleton loader for unrendered pages (takes practically 0 memory)
+          // Skeleton loader for unrendered pages
           const loader = document.createElement('div');
           loader.className = 'absolute inset-0 flex items-center justify-center text-slate-300 loader-spinner';
           loader.innerHTML = '<svg class="animate-spin h-8 w-8" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
@@ -213,7 +275,7 @@ export default function App() {
 
         if (i % 10 === 0) {
             setLoadingProgress(30 + ((i / numPages) * 70));
-            await new Promise(resolve => setTimeout(resolve, 0)); // Yield to keep UI from freezing
+            await new Promise(resolve => setTimeout(resolve, 0)); 
         }
       }
 
@@ -244,7 +306,7 @@ export default function App() {
         const newPageIdx = e.data;
         setCurrentPage(newPageIdx);
         
-        // Lazy load the next few pages smoothly in the background as the user flips
+        // Lazy load the next few pages smoothly in the background
         const targetPage = newPageIdx + 1;
         const pagesToRender = [
           targetPage - 2, targetPage - 1, targetPage, 
@@ -270,7 +332,9 @@ export default function App() {
           flipbookRef.current.style.transition = 'opacity 0.4s ease-in-out';
           flipbookRef.current.style.opacity = '1';
         }
-      }, 150);
+        // Start building the search index in the background after UI settles
+        buildSearchIndex(pdfDocument.current, numPages);
+      }, 500);
       
     } catch (error) {
       console.error(error);
@@ -331,7 +395,6 @@ export default function App() {
     return text.trim();
   };
 
-
   // --- AI Insights Spread Summary ---
   useEffect(() => {
     if (isAiOpen) {
@@ -349,8 +412,8 @@ export default function App() {
         return;
       }
 
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
       
       const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue. 
       Provide a highly structured summary in Markdown. 
@@ -381,26 +444,54 @@ export default function App() {
     }
   };
 
-  // --- Super Smart AI Contextual Search ---
+  // --- Super Smart Hybrid Contextual Search ---
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!searchQuery.trim() || !pdfDocument.current) return;
 
     setIsSearching(true);
     setSearchResults([]);
-    const query = searchQuery.toLowerCase().trim();
+    
+    // Normalizations
+    const query = normalizeText(searchQuery);
+    const numericQuery = normalizeSku(searchQuery);
+    const isNumericSearch = numericQuery.length >= 4;
+    const looseRegex = isNumericSearch ? buildLooseSkuRegex(numericQuery) : null;
+    
     const rawMatches = [];
 
     try {
-      // 1. Initial Pass: Find pages containing the raw query text
+      // 1. Initial Pass: Find pages containing the query text
       for (let i = 1; i <= totalPages; i++) {
         if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0)); // Prevent freeze
 
-        const page = await pdfDocument.current.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map(item => item.str).join(' ');
-        
-        if (pageText.toLowerCase().includes(query)) {
+        let pageText, compactPageText, normalizedPageText, normalizedCompactText;
+
+        // Use index if ready, otherwise fallback to on-the-fly extraction
+        if (skuIndex[i]) {
+          pageText = skuIndex[i].rawText;
+          compactPageText = skuIndex[i].compactText; 
+          normalizedPageText = skuIndex[i].normalizedText;
+          normalizedCompactText = skuIndex[i].compactText;
+        } else {
+          const page = await pdfDocument.current.getPage(i);
+          const textContent = await page.getTextContent();
+          
+          pageText = textContent.items.map(item => item.str).join(" ");
+          const rawCompactText = textContent.items.map(item => item.str).join("");
+          
+          compactPageText = rawCompactText;
+          normalizedPageText = normalizeText(pageText);
+          normalizedCompactText = normalizeText(rawCompactText);
+        }
+
+        const found =
+          normalizedPageText.includes(query) ||
+          normalizedCompactText.includes(query) ||
+          (isNumericSearch && looseRegex && looseRegex.test(pageText)) ||
+          (isNumericSearch && looseRegex && looseRegex.test(compactPageText));
+
+        if (found) {
            rawMatches.push({ pageIndex: i - 1, pageNumber: i, rawText: pageText });
         }
       }
@@ -412,14 +503,14 @@ export default function App() {
 
       // 2. AI Intelligence Pass: Reconstruct product details from the raw PDF text chunk
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
       
       const structuredResults = [];
 
+      // Process in smaller batches if there are many matches to avoid UI freeze
       for (const match of rawMatches) {
-        // We ask the AI to find the relationship between the queried SKU/Name and the surrounding Product Headers and Variants.
         const prompt = `
-          The user searched for: "${query}".
+          The user searched for: "${searchQuery}".
           Here is raw extracted text from a catalogue page where this search term was found.
           
           Catalogue text formatting is messy, but usually follows a pattern:
@@ -427,7 +518,7 @@ export default function App() {
           [Variant 1 Name] [Variant 2 Name]
           #[SKU 1] #[SKU 2]
           
-          Find the exact match for "${query}" in this text. 
+          Find the exact match for "${searchQuery}" in this text. 
           Then, intelligently reconstruct its parent product context. 
           
           Respond ONLY with a JSON array of objects matching this exact schema:
@@ -654,7 +745,10 @@ export default function App() {
             <div className="p-2 bg-blue-500/20 border border-blue-500/30 rounded-lg">
               <Search size={20} strokeWidth={2.5} />
             </div>
-            <h3 className="font-bold text-lg text-white tracking-wide">AI Smart Search</h3>
+            <div className="flex flex-col">
+               <h3 className="font-bold text-lg text-white tracking-wide leading-tight">AI Smart Search</h3>
+               {isIndexing && <span className="text-[10px] text-blue-400 font-semibold uppercase tracking-wider animate-pulse">Building Index...</span>}
+            </div>
           </div>
           <button onClick={() => setIsSearchOpen(false)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-gray-400 hover:text-white">
             <X size={20} strokeWidth={2.5} />
