@@ -61,7 +61,7 @@ export default function App() {
   
   // Use an absolute URL for the PDF to avoid fetch parse errors in sandboxed preview environments.
   // Replace this with your actual absolute URL when deploying (e.g. 'https://yourwebsite.com/catalogue.pdf')
-  const pdfUrl = '/catalogue.pdf';
+  const pdfUrl = 'https://5489382d-e5dd-44ec-a4eb-680874f5cf71.usrfiles.com/ugd/548938_5f8b7b4cc57d44b98d86d234e5fc87aa.pdf';
 
   // --- 1. Load External Scripts ---
   useEffect(() => {
@@ -413,7 +413,7 @@ export default function App() {
       }
 
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
       
       const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue. 
       Provide a highly structured summary in Markdown. 
