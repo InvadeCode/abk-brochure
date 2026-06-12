@@ -413,7 +413,7 @@ export default function App() {
       }
 
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`;
       
       const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue. 
       Provide a highly structured summary in Markdown. 
@@ -503,7 +503,7 @@ export default function App() {
 
       // 2. AI Intelligence Pass: Reconstruct product details from the raw PDF text chunk
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`;
       
       const structuredResults = [];
 
