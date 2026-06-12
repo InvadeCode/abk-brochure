@@ -22,12 +22,33 @@ const normalizeSku = (value) => {
 const buildLooseSkuRegex = (sku) => {
   const digits = normalizeSku(sku).split("");
   if (digits.length === 0) return null;
-  return new RegExp(digits.join("\\D*"), "i");
+  // Allows max 3 non-alphanumeric chars between digits to prevent phone number matches
+  return new RegExp(digits.join("[^a-zA-Z0-9]{0,3}"), "i");
+};
+
+// Robust fetch wrapper with exponential backoff for API limits
+const fetchWithRetry = async (url, options, retries = 5) => {
+  let delay = 1000;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(url, options);
+      if (response.status === 429 && i < retries - 1) {
+        await new Promise(r => setTimeout(r, delay));
+        delay *= 2;
+        continue;
+      }
+      return response;
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      await new Promise(r => setTimeout(r, delay));
+      delay *= 2;
+    }
+  }
 };
 
 export default function App() {
   // --- App State ---
-  const [appState, setAppState] = useState('initializing'); // initializing, ready, loading_pdf, viewing
+  const [appState, setAppState] = useState('initializing'); 
   const [loadingText, setLoadingText] = useState('Loading Core Engines...');
   const [loadingProgress, setLoadingProgress] = useState(0);
   
@@ -54,13 +75,11 @@ export default function App() {
   const flipbookRef = useRef(null);
   const pageFlipInstance = useRef(null);
   const pdfDocument = useRef(null);
-  const pageSize = useRef({ width: 0, height: 0 }); // Store for resize logic
+  const pageSize = useRef({ width: 0, height: 0 });
 
   const renderedPages = useRef(new Set());
   const renderScaleRef = useRef(1.5);
   
-  // Use an absolute URL for the PDF to avoid fetch parse errors in sandboxed preview environments.
-  // Replace this with your actual absolute URL when deploying (e.g. 'https://yourwebsite.com/catalogue.pdf')
   const pdfUrl = 'https://5489382d-e5dd-44ec-a4eb-680874f5cf71.usrfiles.com/ugd/548938_5f8b7b4cc57d44b98d86d234e5fc87aa.pdf';
 
   // --- 1. Load External Scripts ---
@@ -110,20 +129,17 @@ export default function App() {
     const container = flipbookContainerRef.current;
     const { width: baseW, height: baseH } = pageSize.current;
     
-    const cWidth = container.clientWidth;
-    const cHeight = container.clientHeight;
-    
     const isMobile = window.innerWidth < 768;
     const targetRatio = isMobile ? (baseW / baseH) : ((baseW * 2) / baseH);
     
     let finalWidth, finalHeight;
     
-    if (cWidth / cHeight > targetRatio) {
-      finalHeight = cHeight;
-      finalWidth = cHeight * targetRatio;
+    if (container.clientWidth / container.clientHeight > targetRatio) {
+      finalHeight = container.clientHeight;
+      finalWidth = container.clientHeight * targetRatio;
     } else {
-      finalWidth = cWidth;
-      finalHeight = cWidth / targetRatio;
+      finalWidth = container.clientWidth;
+      finalHeight = container.clientWidth / targetRatio;
     }
     
     flipbookRef.current.style.width = `${finalWidth}px`;
@@ -157,20 +173,16 @@ export default function App() {
     
     try {
       for (let i = 1; i <= numPages; i++) {
-        // Yield heavily to UI to prevent freezing while reading
         if (i % 2 === 0) await new Promise(resolve => setTimeout(resolve, 10)); 
         
         const page = await pdfDoc.getPage(i);
         const textContent = await page.getTextContent();
         const pageText = textContent.items.map(item => item.str).join(" ");
-        const compactText = textContent.items.map(item => item.str).join("");
 
         index[i] = {
           pageNumber: i,
           rawText: pageText,
-          normalizedText: normalizeText(pageText),
-          compactText: normalizeText(compactText),
-          numericText: normalizeSku(pageText + compactText)
+          normalizedText: normalizeText(pageText)
         };
       }
       setSkuIndex(index);
@@ -193,7 +205,6 @@ export default function App() {
       const ctx = canvas.getContext('2d');
       await page.render({ canvasContext: ctx, viewport }).promise;
       
-      // Remove loading skeleton once rendered
       const loader = canvas.parentElement.querySelector('.loader-spinner');
       if (loader) loader.remove();
     } catch (error) {
@@ -212,7 +223,7 @@ export default function App() {
       const response = await fetch(pdfUrl);
 
       if (!response || !response.ok) {
-         throw new Error(`Failed to fetch the PDF. Please check the URL.`);
+         throw new Error(`Failed to fetch the PDF.`);
       }
       
       const arrayBuffer = await response.arrayBuffer();
@@ -231,7 +242,7 @@ export default function App() {
       if (flipbookRef.current) flipbookRef.current.innerHTML = '';
 
       const isMobile = window.innerWidth < 768;
-      renderScaleRef.current = isMobile ? 1.0 : 1.5; // Drop scale on mobile to prevent memory crash
+      renderScaleRef.current = isMobile ? 1.0 : 1.5; 
       renderedPages.current.clear();
 
       const page1 = await pdfDocument.current.getPage(1);
@@ -252,7 +263,6 @@ export default function App() {
         canvas.dataset.pageNum = i;
         
         if (i <= 6) {
-          // Only allocate memory & render the first 6 pages upfront
           const page = await pdfDocument.current.getPage(i);
           const viewport = page.getViewport({ scale: renderScaleRef.current });
           canvas.height = viewport.height;
@@ -262,7 +272,6 @@ export default function App() {
           await page.render({ canvasContext: ctx, viewport }).promise;
           renderedPages.current.add(i);
         } else {
-          // Skeleton loader for unrendered pages
           const loader = document.createElement('div');
           loader.className = 'absolute inset-0 flex items-center justify-center text-slate-300 loader-spinner';
           loader.innerHTML = '<svg class="animate-spin h-8 w-8" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
@@ -306,7 +315,6 @@ export default function App() {
         const newPageIdx = e.data;
         setCurrentPage(newPageIdx);
         
-        // Lazy load the next few pages smoothly in the background
         const targetPage = newPageIdx + 1;
         const pagesToRender = [
           targetPage - 2, targetPage - 1, targetPage, 
@@ -332,14 +340,13 @@ export default function App() {
           flipbookRef.current.style.transition = 'opacity 0.4s ease-in-out';
           flipbookRef.current.style.opacity = '1';
         }
-        // Start building the search index in the background after UI settles
         buildSearchIndex(pdfDocument.current, numPages);
       }, 500);
       
     } catch (error) {
       console.error(error);
       setAppState('ready');
-      alert("Failed to load catalogue. Please ensure 'catalogue.pdf' is in the public folder.");
+      alert("Failed to load catalogue.");
     }
   };
 
@@ -362,7 +369,6 @@ export default function App() {
     return `${currentPage + 1} / ${totalPages}`;
   };
 
-  // --- PDF Text Extraction Utility ---
   const extractTextFromVisiblePages = async () => {
     if (!pdfDocument.current || !pageFlipInstance.current) return "";
     
@@ -395,7 +401,6 @@ export default function App() {
     return text.trim();
   };
 
-  // --- AI Insights Spread Summary ---
   useEffect(() => {
     if (isAiOpen) {
       setAiStatus('idle');
@@ -412,8 +417,9 @@ export default function App() {
         return;
       }
 
+      // API Key relies on execution environment injection
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
       
       const prompt = `Analyze this exact text extracted from the current spread of the ABK Imports Product Catalogue. 
       Provide a highly structured summary in Markdown. 
@@ -427,19 +433,24 @@ export default function App() {
         systemInstruction: { parts: [{ text: "You are an AI assistant for a B2B pet supply distributor. Output strictly in well-formatted Markdown." }] }
       };
 
-      const response = await fetch(url, {
+      const response = await fetchWithRetry(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
+
+      if (!response.ok) {
+        throw new Error(`API returned status: ${response.status}`);
+      }
+
       const result = await response.json();
-      if (!result.candidates) throw new Error("API failed.");
+      if (!result.candidates) throw new Error("API failed to return candidates.");
 
       setAiResult(result.candidates[0].content.parts[0].text);
       setAiStatus('success');
 
     } catch (error) {
-      console.error(error);
+      console.error("AI Summary Error:", error);
       setAiStatus('error');
     }
   };
@@ -463,36 +474,31 @@ export default function App() {
     try {
       // 1. Initial Pass: Find pages containing the query text
       for (let i = 1; i <= totalPages; i++) {
-        if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0)); // Prevent freeze
+        if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0)); 
 
-        let pageText, compactPageText, normalizedPageText, normalizedCompactText;
+        let pageText, normalizedPageText;
 
-        // Use index if ready, otherwise fallback to on-the-fly extraction
         if (skuIndex[i]) {
           pageText = skuIndex[i].rawText;
-          compactPageText = skuIndex[i].compactText; 
           normalizedPageText = skuIndex[i].normalizedText;
-          normalizedCompactText = skuIndex[i].compactText;
         } else {
           const page = await pdfDocument.current.getPage(i);
           const textContent = await page.getTextContent();
-          
           pageText = textContent.items.map(item => item.str).join(" ");
-          const rawCompactText = textContent.items.map(item => item.str).join("");
-          
-          compactPageText = rawCompactText;
           normalizedPageText = normalizeText(pageText);
-          normalizedCompactText = normalizeText(rawCompactText);
         }
 
-        const found =
-          normalizedPageText.includes(query) ||
-          normalizedCompactText.includes(query) ||
-          (isNumericSearch && looseRegex && looseRegex.test(pageText)) ||
-          (isNumericSearch && looseRegex && looseRegex.test(compactPageText));
+        // Only exact if the explicit, continuous string is found
+        let foundExact = normalizedPageText.includes(query);
+        const foundLoose = isNumericSearch && looseRegex && looseRegex.test(pageText);
 
-        if (found) {
-           rawMatches.push({ pageIndex: i - 1, pageNumber: i, rawText: pageText });
+        if (foundExact || foundLoose) {
+           rawMatches.push({ 
+             pageIndex: i - 1, 
+             pageNumber: i, 
+             rawText: pageText,
+             isExactMatch: foundExact 
+           });
         }
       }
       
@@ -501,36 +507,25 @@ export default function App() {
         return;
       }
 
-      // 2. AI Intelligence Pass: Reconstruct product details from the raw PDF text chunk
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      
+      // 2. AI Intelligence Pass
+      const apiKey = ""; 
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
       const structuredResults = [];
 
-      // Process in smaller batches if there are many matches to avoid UI freeze
-      for (const match of rawMatches) {
+      const MAX_AI_MATCHES = 5;
+      const matchesToProcess = rawMatches.slice(0, MAX_AI_MATCHES);
+      const remainingMatches = rawMatches.slice(MAX_AI_MATCHES);
+
+      for (const match of matchesToProcess) {
         const prompt = `
           The user searched for: "${searchQuery}".
-          Here is raw extracted text from a catalogue page where this search term was found.
+          Here is raw extracted text from a catalogue page.
           
-          Catalogue text formatting is messy, but usually follows a pattern:
-          [Product Group Name] MRP Rs. [Price]
-          [Variant 1 Name] [Variant 2 Name]
-          #[SKU 1] #[SKU 2]
-          
-          Find the exact match for "${searchQuery}" in this text. 
-          Then, intelligently reconstruct its parent product context. 
-          
-          Respond ONLY with a JSON array of objects matching this exact schema:
-          [
-            {
-              "sku": "The SKU code (e.g., #631528) if applicable",
-              "variantName": "The specific variant name (e.g., Pumpkin Spice Small)",
-              "parentProduct": "The main product header (e.g., Twistix Dental Treats Pouch)",
-              "price": "The price (e.g., Rs. 499.00)"
-            }
-          ]
-          If you cannot find clear context, provide your best guess. Return an empty array [] if the query is a false positive.
+          TASK:
+          1. Check if the product or SKU "${searchQuery}" is explicitly listed as a FULL product entry in this text.
+          2. Extract the associated product details. 
+          3. CRITICAL VETO: If the text is just a stray SKU, an image caption, or a bleed from another page WITHOUT a clear product name AND price grouped with it, YOU MUST return an empty array [].
+          4. Do NOT return literal "null" strings.
           
           RAW PAGE TEXT:
           ${match.rawText}
@@ -538,37 +533,128 @@ export default function App() {
 
         const payload = {
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: "application/json" }
+          systemInstruction: { parts: [{ text: "You are a product data extraction assistant. Extract details from messy catalog text." }] },
+          generationConfig: { 
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  sku: { type: "STRING" },
+                  variantName: { type: "STRING" },
+                  parentProduct: { type: "STRING" },
+                  price: { type: "STRING" }
+                }
+              }
+            }
+          }
         };
 
+        // Generate a snippet fallback
+        let snippet = match.rawText;
+        let queryIndex = snippet.toLowerCase().indexOf(searchQuery.toLowerCase());
+        
+        if (queryIndex === -1 && isNumericSearch && looseRegex) {
+            const regexMatch = snippet.match(looseRegex);
+            if (regexMatch) queryIndex = regexMatch.index;
+        }
+
+        if (queryIndex !== -1) {
+            const start = Math.max(0, queryIndex - 40);
+            const end = Math.min(snippet.length, queryIndex + 60);
+            snippet = "..." + snippet.substring(start, end) + "...";
+        } else {
+            snippet = snippet.substring(0, 100) + "...";
+        }
+
         try {
-          const response = await fetch(url, {
+          // fetchWithRetry replaces standard fetch to handle AI quotas and injections automatically
+          const response = await fetchWithRetry(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
+          
+          if (!response || !response.ok) {
+             structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null, snippet });
+             continue;
+          }
+          
           const aiResult = await response.json();
           
           if (aiResult.candidates && aiResult.candidates[0].content.parts[0].text) {
-             const parsedData = JSON.parse(aiResult.candidates[0].content.parts[0].text);
-             if (parsedData && parsedData.length > 0) {
-               structuredResults.push({
-                 pageIndex: match.pageIndex,
-                 pageNumber: match.pageNumber,
-                 details: parsedData[0] // Taking the best first match
-               });
-             } else {
-               // Fallback if AI couldn't reconstruct context but text was found
-               structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null });
+             const rawText = aiResult.candidates[0].content.parts[0].text;
+             const cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+             try {
+               const parsedData = JSON.parse(cleanText);
+
+               if (parsedData && parsedData.length > 0) {
+                 const p = parsedData[0];
+                 
+                 // Clean up literal "null" strings that AI sometimes returns
+                 const cleanProduct = p.parentProduct && String(p.parentProduct).toLowerCase() !== "null" ? p.parentProduct : null;
+                 const cleanVariant = p.variantName && String(p.variantName).toLowerCase() !== "null" ? p.variantName : null;
+                 const cleanSku = p.sku && String(p.sku).toLowerCase() !== "null" ? p.sku : null;
+                 const cleanPrice = p.price && String(p.price).toLowerCase() !== "null" ? p.price : null;
+
+                 // Strict Condition: Must have a clear product name AND price to be considered a real catalog entry.
+                 // This effectively eliminates ghost text, footers, and image captions (like page 101).
+                 if (cleanProduct && cleanPrice) {
+                   structuredResults.push({
+                     pageIndex: match.pageIndex,
+                     pageNumber: match.pageNumber,
+                     details: {
+                       parentProduct: cleanProduct,
+                       variantName: cleanVariant,
+                       sku: cleanSku,
+                       price: cleanPrice
+                     },
+                     snippet
+                   });
+                 } else {
+                    // AI couldn't find a full product entry. Trust AI and drop it.
+                    continue;
+                 }
+               } else if (Array.isArray(parsedData) && parsedData.length === 0) {
+                 // AI explicitly rejected this page (e.g. phone number or image tag). Safe to drop entirely.
+                 continue; 
+               } else {
+                 continue;
+               }
+             } catch (e) {
+                 continue;
              }
+          } else {
+             continue;
           }
         } catch (aiErr) {
-          console.error("AI Context extraction failed for page", match.pageNumber, aiErr);
-          // Fallback
-          structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null });
+          // Fallback if API fails
+          structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null, snippet });
         }
       }
       
+      // Quickly append the rest of the matches without AI processing
+      for (const match of remainingMatches) {
+         let snippet = match.rawText;
+         let queryIndex = snippet.toLowerCase().indexOf(searchQuery.toLowerCase());
+         
+         if (queryIndex === -1 && isNumericSearch && looseRegex) {
+             const regexMatch = snippet.match(looseRegex);
+             if (regexMatch) queryIndex = regexMatch.index;
+         }
+
+         if (queryIndex !== -1) {
+             const start = Math.max(0, queryIndex - 40);
+             const end = Math.min(snippet.length, queryIndex + 60);
+             snippet = "..." + snippet.substring(start, end) + "...";
+         } else {
+             snippet = snippet.substring(0, 100) + "...";
+         }
+         structuredResults.push({ pageIndex: match.pageIndex, pageNumber: match.pageNumber, details: null, snippet });
+      }
+
       setSearchResults(structuredResults);
       
       if (structuredResults.length === 1) {
@@ -779,7 +865,7 @@ export default function App() {
           {isSearching && (
             <div className="flex flex-col items-center justify-center h-full text-center text-blue-400">
               <Loader2 size={40} className="animate-spin mb-4" />
-              <p className="font-medium tracking-wide">Extracting & Analyzing context...</p>
+              <p className="font-medium tracking-wide">Finding SKU...</p>
             </div>
           )}
 
@@ -832,8 +918,9 @@ export default function App() {
                         </div>
                       </>
                     ) : (
-                      <div className="text-sm text-slate-400 italic">
-                         Exact match found, but detailed product context could not be confidently reconstructed from the raw text layout.
+                      <div className="text-sm text-slate-400 italic break-words">
+                         <span className="text-slate-500 font-semibold uppercase text-[10px] tracking-widest block mb-1">Raw Match Snippet:</span>
+                         "{result.snippet}"
                       </div>
                     )}
                   </div>
